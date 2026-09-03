@@ -87,6 +87,14 @@ export async function stubSqs() {
         // The SDK verifies this digest and throws InvalidChecksumError otherwise.
         body = { MessageId: `stub-${sent.length}`, MD5OfMessageBody: md5(payload.MessageBody ?? '') };
       } else if (target === 'ReceiveMessage') {
+        if (inbox.length === 0) {
+          // Stand in for long polling. Without a pause the consumer loop spins.
+          setTimeout(() => {
+            res.writeHead(200, { 'content-type': 'application/x-amz-json-1.0' });
+            res.end('{}');
+          }, 50);
+          return;
+        }
         const batch = inbox.splice(0, payload.MaxNumberOfMessages || 10).map((message, index) => ({
           MessageId: message.MessageId || `stub-in-${index}`,
           ReceiptHandle: message.ReceiptHandle || `receipt-${index}`,
