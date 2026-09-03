@@ -4,13 +4,13 @@ Shared by all three architectures. Apps are built once against this; each `infra
 
 ## Services
 
-Two Node 22 services, plain ESM JavaScript, Hono, no TypeScript build step. Each exports one `handle(request) -> response` function from `apps/<svc>/src/app.mjs` and has two entrypoints:
+Two Node 22 services, plain ESM JavaScript, Hono, no TypeScript build step. Each exports a Hono `app` from `apps/<svc>/src/app.mjs` and has two entrypoints:
 
-- `apps/<svc>/src/lambda.mjs`: API Gateway proxy event (REST v1 and HTTP API v2 payload 2.0) to `handle`, response back to proxy shape.
-- `apps/<svc>/src/server.mjs`: `node:http` server on `PORT` (default 8080) to `handle`.
+- `apps/<svc>/src/lambda.mjs`: `handle(app)` from `hono/aws-lambda`, exported as `handler`, for REST v1 and HTTP API v2 payload 2.0 events; `sqsHandler` for queue records.
+- `apps/<svc>/src/server.mjs`: `serve(app)` from `@hono/node-server` on `PORT` (default 8080).
 - `apps/<svc>/Dockerfile`: `node:22-alpine`, runs `server.mjs`. Image tag `ftw-<svc>:local`, built by `make images`.
 
-`request` is `{ method, path, headers, body (parsed JSON or null), sourceIp }`. `response` is `{ status, headers?, body (object) }`.
+Handlers read the parsed body, query and raw body from the Hono context. Responses are JSON objects with the status codes listed below.
 
 ### retail
 
