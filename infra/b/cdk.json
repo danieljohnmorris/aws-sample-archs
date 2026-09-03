@@ -1,0 +1,31 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/app.ts",
+  "watch": {
+    "include": [
+      "**"
+    ],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "**/*.d.ts",
+      "node_modules",
+      "package*.json",
+      "tsconfig.json"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "@aws-cdk/aws-ecs:disableEcsImdsBlocking": true,
+    "@aws-cdk/core:target-partitions": [
+      "aws"
+    ],
+    "availability-zones:account=000000000000:region=eu-west-2": [
+      "eu-west-2a",
+      "eu-west-2b",
+      "eu-west-2c"
+    ]
+  }
+}
