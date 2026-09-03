@@ -17,8 +17,10 @@
     "@aws-sdk/client-eventbridge": "^3.658.0",
     "@aws-sdk/client-sqs": "^3.658.0",
     "@aws-sdk/credential-provider-node": "^3.658.0",
+    "@hono/node-server": "^2.1.1",
     "@smithy/protocol-http": "^4.1.0",
     "@smithy/signature-v4": "^4.1.0",
+    "hono": "^4.13.5",
     "pg": "^8.13.0"
   }
 }

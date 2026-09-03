@@ -23,11 +23,13 @@ e2e/                One scenario test, runs against any of the three
 docker-compose.yml  floci plus a profile per architecture
 ```
 
+Each service is one [Hono](https://hono.dev) app object. `hono/aws-lambda` serves it as a Lambda handler and `@hono/node-server` serves it in a container, so the routes, the allowlist, the correlation id and the request log are written once and run the same in both. The three architectures put the same app behind API Gateway and behind an ALB, and only the entrypoint changes.
+
 The service contract is in [CONTRACT.md](CONTRACT.md). What floci does and does not enforce is in [docs/day-one-floci-checks.md](docs/day-one-floci-checks.md). Read the contract before changing an app or a stack.
 
 ## Requirements
 
-- Node 22 or newer. The apps are plain ESM JavaScript, no TypeScript and no build step.
+- Node 22 or newer. The apps are plain ESM JavaScript on Hono, no TypeScript and no build step.
 - Docker, for floci and for the Postgres the tests use.
 - AWS CLI v2 and CDK CLI 2.1139.0 or newer, for the stacks.
 
@@ -87,7 +89,7 @@ They cover every route, the allowlist accepting and rejecting, the webhook signa
 
 Each test file gets its own database, because `node --test` runs files in parallel and shared tables would be truncated underneath each other.
 
-Without `DATABASE_URL` the suites that need it skip and print the `docker run` line above. The allowlist and proxy event mapping suites need no database and always run.
+Without `DATABASE_URL` the suites that need it skip and print the `docker run` line above. The allowlist suite and the payload version checks in the proxy event mapping suite need no database and always run. The rest of that suite calls `handler` for real, so it needs one.
 
 ### End-to-end
 

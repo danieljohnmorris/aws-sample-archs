@@ -1,7 +1,9 @@
-// Retail HTTP surface. One handle() for both entrypoints, per CONTRACT.md.
+// Retail HTTP surface. One Hono app serves both entrypoints, per CONTRACT.md:
+// src/lambda.mjs hands it API Gateway events, src/server.mjs hands it a socket.
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { Hono } from 'hono';
 import { allowlistCheck, normaliseIp } from './allowlist.mjs';
-import { correlationIdFrom, headerValue, logEvent, logRequest } from './log.mjs';
+import { correlationIdFrom, logEvent, logRequest } from './log.mjs';
 import {
   FULFILLED,
   PENDING,
@@ -16,74 +18,74 @@ import { fetchCheck, publishOrderEvent, sendCheckRequest, usesQueues } from './o
 
 const SERVICE = 'retail';
 
+export const app = new Hono();
+
 /**
- * request:  { method, path, query, headers, body, rawBody, sourceIp }
- * response: { status, headers, body }
+ * Correlation id, the access log line, and the two headers every response
+ * carries. Registered first so it wraps the allowlist and the 404 as well.
  */
-export async function handle(request) {
+app.use('*', async (c, next) => {
   const started = Date.now();
-  const correlationId = correlationIdFrom(request.headers);
-  let response;
+  const correlationId = correlationIdFrom(c.req.header());
+  c.set('correlationId', correlationId);
+  c.set('sourceIp', sourceIpOf(c));
+
   try {
-    response = await route(request, correlationId);
+    await next();
   } catch (err) {
-    logEvent('error', 'unhandled', {
-      correlationId,
-      path: request.path,
-      error: err.message,
-      stack: err.stack,
-    });
-    response = { status: 500, body: { error: 'internal_error' } };
+    // app.onError takes anything thrown as an Error. This catches the rest, so
+    // no request escapes without a response and a log line.
+    c.res = failed(c, err);
   }
-  const headers = {
-    'content-type': 'application/json',
-    'x-correlation-id': correlationId,
-    ...(response.headers || {}),
-  };
+
+  c.res.headers.set('content-type', 'application/json');
+  c.res.headers.set('x-correlation-id', correlationId);
   logRequest({
-    method: request.method,
-    path: request.path,
-    status: response.status,
+    method: c.req.method,
+    path: c.req.path,
+    status: c.res.status,
     ms: Date.now() - started,
     correlationId,
-    sourceIp: normaliseIp(request.sourceIp),
+    sourceIp: normaliseIp(c.get('sourceIp')),
   });
-  return { status: response.status, headers, body: response.body };
+});
+
+/** ALLOWED_CIDRS gate. /health is exempt, so health checks keep working. */
+app.use('*', async (c, next) => {
+  const blocked = allowlistCheck(
+    { path: c.req.path, sourceIp: c.get('sourceIp') },
+    process.env.ALLOWED_CIDRS,
+  );
+  if (blocked) return c.json(blocked.body, blocked.status);
+  await next();
+});
+
+app.onError((err, c) => failed(c, err));
+
+function failed(c, err) {
+  logEvent('error', 'unhandled', {
+    correlationId: c.get('correlationId'),
+    path: c.req.path,
+    error: err?.message,
+    stack: err?.stack,
+  });
+  return c.json({ error: 'internal_error' }, 500);
 }
 
-async function route(request, correlationId) {
-  const { method, path } = request;
+app.notFound((c) => c.json({ error: 'not_found', path: c.req.path }, 404));
 
-  if (method === 'GET' && path === '/health') {
-    return { status: 200, body: { ok: true, service: SERVICE } };
-  }
+app.get('/health', (c) => c.json({ ok: true, service: SERVICE }));
 
-  const blocked = allowlistCheck(request, process.env.ALLOWED_CIDRS);
-  if (blocked) return blocked;
-
-  if (method === 'POST' && path === '/orders') return postOrder(request, correlationId);
-
-  const order = path.match(/^\/orders\/([^/]+)$/);
-  if (method === 'GET' && order) return getOrderRoute(decodeURIComponent(order[1]));
-
-  if (method === 'POST' && path === '/internal/prescription-result') {
-    return postPrescriptionResult(request, correlationId);
-  }
-
-  if (method === 'POST' && path === '/webhooks/payment') return postPaymentWebhook(request, correlationId);
-
-  return { status: 404, body: { error: 'not_found', path } };
-}
-
-async function postOrder(request, correlationId) {
-  const body = request.body || {};
+app.post('/orders', async (c) => {
+  const correlationId = c.get('correlationId');
+  const body = (await jsonBody(c)) || {};
   const { customerId, sku, prescriptionId } = body;
   const quantity = body.quantity;
   const missing = [];
   if (!customerId) missing.push('customerId');
   if (!sku) missing.push('sku');
   if (!Number.isInteger(quantity) || quantity < 1) missing.push('quantity');
-  if (missing.length > 0) return { status: 400, body: { error: 'invalid_request', missing } };
+  if (missing.length > 0) return c.json({ error: 'invalid_request', missing }, 400);
 
   const orderId = randomUUID();
   await insertOrder({ orderId, customerId, sku, quantity, prescriptionId });
@@ -96,20 +98,14 @@ async function postOrder(request, correlationId) {
       correlationId,
     });
     logEvent('info', 'order fulfilled', { correlationId, orderId, sku });
-    return { status: 201, body: { orderId, status: FULFILLED } };
+    return c.json({ orderId, status: FULFILLED }, 201);
   }
 
   if (!prescriptionId) {
-    await setStatus(orderId, REJECTED, 'prescriptionId is required for a prescription-only sku');
+    const reason = 'prescriptionId is required for a prescription-only sku';
+    await setStatus(orderId, REJECTED, reason);
     logEvent('info', 'order rejected', { correlationId, orderId, reason: 'missing prescriptionId' });
-    return {
-      status: 201,
-      body: {
-        orderId,
-        status: REJECTED,
-        reason: 'prescriptionId is required for a prescription-only sku',
-      },
-    };
+    return c.json({ orderId, status: REJECTED, reason }, 201);
   }
 
   await publishOrderEvent({
@@ -124,9 +120,9 @@ async function postOrder(request, correlationId) {
       await sendCheckRequest({ orderId, prescriptionId, customerId, sku, correlationId });
     } catch (err) {
       logEvent('error', 'check request send failed', { correlationId, orderId, error: err.message });
-      return { status: 502, body: { orderId, status: PENDING, error: 'check_request_failed' } };
+      return c.json({ orderId, status: PENDING, error: 'check_request_failed' }, 502);
     }
-    return { status: 202, body: { orderId, status: PENDING } };
+    return c.json({ orderId, status: PENDING }, 202);
   }
 
   // Architectures A and C. Ask pharmacy now and answer with the decision.
@@ -135,7 +131,7 @@ async function postOrder(request, correlationId) {
     check = await fetchCheck({ prescriptionId, customerId, sku, correlationId });
   } catch (err) {
     logEvent('error', 'prescription check failed', { correlationId, orderId, error: err.message });
-    return { status: 502, body: { orderId, status: PENDING, error: 'prescription_check_failed' } };
+    return c.json({ orderId, status: PENDING, error: 'prescription_check_failed' }, 502);
   }
 
   const applied = await applyCheckResult({ orderId, valid: check.valid, reason: check.reason });
@@ -153,28 +149,30 @@ async function postOrder(request, correlationId) {
   });
   const responseBody = { orderId, status: decided.status };
   if (decided.reason) responseBody.reason = decided.reason;
-  return { status: 201, body: responseBody };
-}
+  return c.json(responseBody, 201);
+});
 
-async function getOrderRoute(orderId) {
+app.get('/orders/:id', async (c) => {
+  const orderId = c.req.param('id');
   const row = await getOrder(orderId);
-  if (!row) return { status: 404, body: { error: 'not_found', orderId } };
+  if (!row) return c.json({ error: 'not_found', orderId }, 404);
   const body = { orderId: row.order_id, status: row.status };
   if (row.reason) body.reason = row.reason;
-  return { status: 200, body };
-}
+  return c.json(body);
+});
 
-async function postPrescriptionResult(request, correlationId) {
-  const body = request.body || {};
+app.post('/internal/prescription-result', async (c) => {
+  const correlationId = c.get('correlationId');
+  const body = (await jsonBody(c)) || {};
   if (!body.orderId || typeof body.valid !== 'boolean') {
-    return { status: 400, body: { error: 'invalid_request', missing: ['orderId', 'valid'] } };
+    return c.json({ error: 'invalid_request', missing: ['orderId', 'valid'] }, 400);
   }
   const applied = await applyCheckResult({
     orderId: body.orderId,
     valid: body.valid,
     reason: body.reason,
   });
-  if (!applied.order) return { status: 404, body: { error: 'not_found', orderId: body.orderId } };
+  if (!applied.order) return c.json({ error: 'not_found', orderId: body.orderId }, 404);
   logEvent('info', 'check result applied', {
     correlationId,
     orderId: body.orderId,
@@ -187,31 +185,32 @@ async function postPrescriptionResult(request, correlationId) {
     applied: applied.applied,
   };
   if (applied.order.reason) responseBody.reason = applied.order.reason;
-  return { status: 200, body: responseBody };
-}
+  return c.json(responseBody);
+});
 
 /**
  * Third-party inbound. The signature covers the bytes as they arrived, so the
- * raw body is what gets hashed, never a re-serialised object.
+ * raw text is what gets hashed, never a re-serialised object.
  */
-function postPaymentWebhook(request, correlationId) {
+app.post('/webhooks/payment', async (c) => {
+  const correlationId = c.get('correlationId');
   const secret = process.env.PAYMENT_WEBHOOK_SECRET;
   if (!secret) {
     logEvent('error', 'webhook secret missing', { correlationId });
-    return { status: 500, body: { error: 'webhook_not_configured' } };
+    return c.json({ error: 'webhook_not_configured' }, 500);
   }
-  const provided = headerValue(request.headers, 'x-signature');
-  if (!provided) return { status: 401, body: { error: 'missing_signature' } };
+  const provided = c.req.header('x-signature');
+  if (!provided) return c.json({ error: 'missing_signature' }, 401);
 
-  const raw = typeof request.rawBody === 'string' ? request.rawBody : JSON.stringify(request.body ?? {});
+  const raw = await c.req.text();
   const expected = createHmac('sha256', secret).update(raw, 'utf8').digest('hex');
   if (!signatureMatches(provided, expected)) {
     logEvent('warn', 'webhook signature rejected', { correlationId });
-    return { status: 401, body: { error: 'bad_signature' } };
+    return c.json({ error: 'bad_signature' }, 401);
   }
-  logEvent('info', 'webhook accepted', { correlationId, event: request.body?.event ?? null });
-  return { status: 200, body: { ok: true } };
-}
+  logEvent('info', 'webhook accepted', { correlationId, event: parseJson(raw)?.event ?? null });
+  return c.json({ ok: true });
+});
 
 /** Accepts a bare hex digest or a `sha256=` prefixed one. Compare is constant time. */
 export function signatureMatches(provided, expectedHex) {
@@ -222,3 +221,41 @@ export function signatureMatches(provided, expectedHex) {
   if (left.length !== right.length) return false;
   return timingSafeEqual(left, right);
 }
+
+/**
+ * Lambda puts the caller's address on the event, the container puts it on the
+ * socket. Behind an ALB or API Gateway the first x-forwarded-for hop is the
+ * real caller, which is also the fallback when an event carries no address.
+ */
+function sourceIpOf(c) {
+  const event = c.env?.event;
+  if (event) {
+    const context = event.requestContext;
+    const fromEvent = context?.http?.sourceIp ?? context?.identity?.sourceIp;
+    return fromEvent || firstForwardedHop(c) || '';
+  }
+  return firstForwardedHop(c) || c.env?.incoming?.socket?.remoteAddress || '';
+}
+
+function firstForwardedHop(c) {
+  const forwarded = c.req.header('x-forwarded-for');
+  if (!forwarded) return '';
+  return forwarded.split(',')[0].trim();
+}
+
+/** The parsed JSON body, or null when there is none and when it will not parse. */
+async function jsonBody(c) {
+  return parseJson(await c.req.text());
+}
+
+function parseJson(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export default app;

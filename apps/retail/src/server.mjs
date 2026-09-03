@@ -1,49 +1,40 @@
-// node:http entrypoint for container mode. Also starts the architecture B
-// consumer loop when its queue URL is set.
-import { createServer as createHttpServer } from 'node:http';
+// Container entrypoint. Serves the Hono app over node:http through
+// @hono/node-server, and starts the architecture B consumer loop when its
+// queue URL is set.
 import { pathToFileURL } from 'node:url';
-import { handle } from './app.mjs';
+import { serve } from '@hono/node-server';
+import { app } from './app.mjs';
 import { startConsumer, stopConsumer } from './consumer.mjs';
 import { closePool } from './db.mjs';
 import { logEvent } from './log.mjs';
 
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_048_576);
 
-/** Reads the request, calls handle(), writes the JSON response. */
-export function createServer() {
-  return createHttpServer(async (req, res) => {
-    let rawBody;
-    try {
-      rawBody = await readBody(req);
-    } catch (err) {
-      res.writeHead(413, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'payload_too_large' }));
-      logEvent('warn', 'body rejected', { path: req.url, error: err.message });
-      return;
-    }
+/**
+ * Rejects an oversized body before the app reads it. The whole body is buffered
+ * either way, so it is read here once and replayed to the app.
+ */
+export async function fetchWithBodyLimit(request, env) {
+  if (!request.body) return app.fetch(request, env);
 
-    const url = new URL(req.url || '/', 'http://placeholder');
-    const query = {};
-    for (const [key, value] of url.searchParams) query[key] = value;
-
-    const response = await handle({
-      method: (req.method || 'GET').toUpperCase(),
-      path: url.pathname,
-      query,
-      headers: req.headers,
-      body: parseJson(rawBody),
-      rawBody,
-      sourceIp: sourceIpOf(req),
+  let raw;
+  try {
+    raw = await readLimited(request);
+  } catch (err) {
+    const url = new URL(request.url);
+    logEvent('warn', 'body rejected', { path: `${url.pathname}${url.search}`, error: err.message });
+    return new Response(JSON.stringify({ error: 'payload_too_large' }), {
+      status: 413,
+      headers: { 'content-type': 'application/json' },
     });
+  }
 
-    const body = JSON.stringify(response.body ?? {});
-    res.writeHead(response.status, {
-      'content-type': 'application/json',
-      ...(response.headers || {}),
-      'content-length': Buffer.byteLength(body),
-    });
-    res.end(body);
+  const replayed = new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: raw,
   });
+  return app.fetch(replayed, env);
 }
 
 /**
@@ -51,10 +42,10 @@ export function createServer() {
  * Returns a handle with close() so tests can shut it down.
  */
 export async function start(port = Number(process.env.PORT || 8080)) {
-  const server = createServer();
+  let server;
   await new Promise((resolve, reject) => {
+    server = serve({ fetch: fetchWithBodyLimit, port }, () => resolve());
     server.once('error', reject);
-    server.listen(port, resolve);
   });
   const actualPort = server.address().port;
   logEvent('info', 'listening', { port: actualPort });
@@ -71,42 +62,21 @@ export async function start(port = Number(process.env.PORT || 8080)) {
   };
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on('data', (chunk) => {
-      size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(new Error(`body over ${MAX_BODY_BYTES} bytes`));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
-  });
-}
-
-/** Behind an ALB or API Gateway the real caller is the first x-forwarded-for entry. */
-function sourceIpOf(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (forwarded) {
-    const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded).split(',')[0].trim();
-    if (first) return first;
+async function readLimited(request) {
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > MAX_BODY_BYTES) {
+      await reader.cancel();
+      throw new Error(`body over ${MAX_BODY_BYTES} bytes`);
+    }
+    chunks.push(value);
   }
-  return req.socket?.remoteAddress || '';
-}
-
-function parseJson(raw) {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
-  }
+  return Buffer.concat(chunks);
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

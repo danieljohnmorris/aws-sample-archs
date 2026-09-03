@@ -4,7 +4,7 @@ Shared by all three architectures. Apps are built once against this; each `infra
 
 ## Services
 
-Two Node 22 services, plain ESM JavaScript, no framework, no TypeScript build step. Each exports one `handle(request) -> response` function from `apps/<svc>/src/app.mjs` and has two entrypoints:
+Two Node 22 services, plain ESM JavaScript, Hono, no TypeScript build step. Each exports one `handle(request) -> response` function from `apps/<svc>/src/app.mjs` and has two entrypoints:
 
 - `apps/<svc>/src/lambda.mjs`: API Gateway proxy event (REST v1 and HTTP API v2 payload 2.0) to `handle`, response back to proxy shape.
 - `apps/<svc>/src/server.mjs`: `node:http` server on `PORT` (default 8080) to `handle`.

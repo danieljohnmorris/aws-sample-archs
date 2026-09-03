@@ -5,8 +5,8 @@ import { SKIP, envSnapshot, stubPharmacy, stubSqs, testRegion, truncate, useData
 
 const SECRET = 'shh-test-secret';
 
-describe('retail handle()', { skip: SKIP }, () => {
-  let handle;
+describe('retail app', { skip: SKIP }, () => {
+  let app;
   let query;
   let closePool;
   let resetClients;
@@ -42,7 +42,7 @@ describe('retail handle()', { skip: SKIP }, () => {
     process.env.AWS_ENDPOINT_URL = sqs.endpoint;
     ({ query, closePool } = await import('../src/db.mjs'));
     ({ resetClients } = await import('../src/outbound.mjs'));
-    ({ handle } = await import('../src/app.mjs'));
+    ({ app } = await import('../src/app.mjs'));
   });
 
   after(async () => {
@@ -65,28 +65,54 @@ describe('retail handle()', { skip: SKIP }, () => {
     await truncate(query, ['orders', 'processed_messages']);
   });
 
-  const request = (overrides) => ({
-    method: 'GET',
-    path: '/health',
-    query: {},
-    headers: {},
-    body: null,
-    rawBody: '',
-    sourceIp: '10.0.0.1',
-    ...overrides,
-  });
+  /**
+   * Drives the Hono app the way the container entrypoint does: the caller's
+   * address arrives on the socket, which @hono/node-server exposes as c.env.incoming.
+   */
+  const call = async (path, options = {}) => {
+    const { method = 'GET', headers = {}, body, rawBody, sourceIp = '10.0.0.1' } = options;
+    const init = { method, headers: { ...headers } };
+    const raw = rawBody !== undefined ? rawBody : body !== undefined ? JSON.stringify(body) : undefined;
+    if (raw !== undefined) {
+      init.body = raw;
+      const named = Object.keys(init.headers).some((key) => key.toLowerCase() === 'content-type');
+      if (!named) init.headers['content-type'] = 'application/json';
+    }
+    const response = await app.request(path, init, { incoming: { socket: { remoteAddress: sourceIp } } });
+    return {
+      status: response.status,
+      headers: Object.fromEntries(response.headers),
+      body: await response.json(),
+    };
+  };
 
-  const postOrder = (body, overrides = {}) =>
-    handle(request({ method: 'POST', path: '/orders', body, ...overrides }));
+  const postOrder = (body, overrides = {}) => call('/orders', { method: 'POST', body, ...overrides });
 
   it('answers /health', async () => {
-    const response = await handle(request({ path: '/health' }));
+    const response = await call('/health');
     assert.equal(response.status, 200);
     assert.deepEqual(response.body, { ok: true, service: 'retail' });
+    assert.equal(response.headers['content-type'], 'application/json');
+  });
+
+  it('echoes an inbound correlation id', async () => {
+    const response = await call('/health', { headers: { 'X-Correlation-Id': 'abc-123' } });
+    assert.equal(response.headers['x-correlation-id'], 'abc-123');
+  });
+
+  it('generates a correlation id when none arrives', async () => {
+    const response = await call('/health');
+    assert.match(response.headers['x-correlation-id'], /^[0-9a-f-]{36}$/);
   });
 
   it('404s an unknown route', async () => {
-    const response = await handle(request({ path: '/nope' }));
+    const response = await call('/nope');
+    assert.equal(response.status, 404);
+    assert.deepEqual(response.body, { error: 'not_found', path: '/nope' });
+  });
+
+  it('404s a route that exists under another method', async () => {
+    const response = await call('/orders');
     assert.equal(response.status, 404);
   });
 
@@ -103,6 +129,12 @@ describe('retail handle()', { skip: SKIP }, () => {
       const response = await postOrder({ sku: 'TEE-1' });
       assert.equal(response.status, 400);
       assert.deepEqual(response.body.missing, ['customerId', 'quantity']);
+    });
+
+    it('rejects a body that is not JSON', async () => {
+      const response = await call('/orders', { method: 'POST', rawBody: 'not json' });
+      assert.equal(response.status, 400);
+      assert.deepEqual(response.body.missing, ['customerId', 'sku', 'quantity']);
     });
 
     it('rejects a quantity that is not a positive integer', async () => {
@@ -160,7 +192,7 @@ describe('retail handle()', { skip: SKIP }, () => {
         assert.equal(response.status, 502);
         assert.equal(response.body.status, 'PENDING');
         assert.equal(response.body.error, 'prescription_check_failed');
-        const stored = await handle(request({ path: `/orders/${response.body.orderId}` }));
+        const stored = await call(`/orders/${response.body.orderId}`);
         assert.equal(stored.body.status, 'PENDING');
       });
     });
@@ -220,20 +252,27 @@ describe('retail handle()', { skip: SKIP }, () => {
   describe('GET /orders/:id', () => {
     it('returns the stored status', async () => {
       const created = await postOrder({ customerId: 'c1', sku: 'TEE-1', quantity: 1 });
-      const response = await handle(request({ path: `/orders/${created.body.orderId}` }));
+      const response = await call(`/orders/${created.body.orderId}`);
       assert.equal(response.status, 200);
       assert.deepEqual(response.body, { orderId: created.body.orderId, status: 'FULFILLED' });
     });
 
     it('includes the reason when there is one', async () => {
       const created = await postOrder({ customerId: 'c1', sku: 'RX-FOOD-1', quantity: 1, prescriptionId: 'RX-EXPIRED' });
-      const response = await handle(request({ path: `/orders/${created.body.orderId}` }));
+      const response = await call(`/orders/${created.body.orderId}`);
       assert.match(response.body.reason, /expired/);
     });
 
     it('404s an unknown order', async () => {
-      const response = await handle(request({ path: '/orders/does-not-exist' }));
+      const response = await call('/orders/does-not-exist');
       assert.equal(response.status, 404);
+      assert.deepEqual(response.body, { error: 'not_found', orderId: 'does-not-exist' });
+    });
+
+    it('decodes an escaped order id', async () => {
+      const response = await call('/orders/a%2Fb');
+      assert.equal(response.status, 404);
+      assert.equal(response.body.orderId, 'a/b');
     });
   });
 
@@ -246,11 +285,11 @@ describe('retail handle()', { skip: SKIP }, () => {
       return created.body.orderId;
     };
 
+    const apply = (body) => call('/internal/prescription-result', { method: 'POST', body });
+
     it('fulfils a pending order', async () => {
       const orderId = await pending();
-      const response = await handle(
-        request({ method: 'POST', path: '/internal/prescription-result', body: { orderId, valid: true } }),
-      );
+      const response = await apply({ orderId, valid: true });
       assert.equal(response.status, 200);
       assert.equal(response.body.status, 'FULFILLED');
       assert.equal(response.body.applied, true);
@@ -258,44 +297,27 @@ describe('retail handle()', { skip: SKIP }, () => {
 
     it('rejects a pending order with a reason', async () => {
       const orderId = await pending();
-      const response = await handle(
-        request({
-          method: 'POST',
-          path: '/internal/prescription-result',
-          body: { orderId, valid: false, reason: 'prescription expired' },
-        }),
-      );
+      const response = await apply({ orderId, valid: false, reason: 'prescription expired' });
       assert.equal(response.body.status, 'REJECTED');
       assert.equal(response.body.reason, 'prescription expired');
     });
 
     it('does not rewrite a decision on a second call', async () => {
       const orderId = await pending();
-      const body = { orderId, valid: true };
-      const first = await handle(request({ method: 'POST', path: '/internal/prescription-result', body }));
+      const first = await apply({ orderId, valid: true });
       assert.equal(first.body.applied, true);
-      const second = await handle(
-        request({
-          method: 'POST',
-          path: '/internal/prescription-result',
-          body: { orderId, valid: false, reason: 'late reversal' },
-        }),
-      );
+      const second = await apply({ orderId, valid: false, reason: 'late reversal' });
       assert.equal(second.body.applied, false);
       assert.equal(second.body.status, 'FULFILLED');
     });
 
     it('400s a body with no orderId or valid flag', async () => {
-      const response = await handle(
-        request({ method: 'POST', path: '/internal/prescription-result', body: { orderId: 'x' } }),
-      );
+      const response = await apply({ orderId: 'x' });
       assert.equal(response.status, 400);
     });
 
     it('404s an unknown order', async () => {
-      const response = await handle(
-        request({ method: 'POST', path: '/internal/prescription-result', body: { orderId: 'nope', valid: true } }),
-      );
+      const response = await apply({ orderId: 'nope', valid: true });
       assert.equal(response.status, 404);
     });
   });
@@ -305,15 +327,7 @@ describe('retail handle()', { skip: SKIP }, () => {
     const sign = (body, secret = SECRET) => createHmac('sha256', secret).update(body, 'utf8').digest('hex');
 
     const post = (headers, rawBody = raw) =>
-      handle(
-        request({
-          method: 'POST',
-          path: '/webhooks/payment',
-          headers,
-          rawBody,
-          body: JSON.parse(rawBody),
-        }),
-      );
+      call('/webhooks/payment', { method: 'POST', headers, rawBody });
 
     it('accepts a correct signature', async () => {
       const response = await post({ 'x-signature': sign(raw) });
@@ -342,6 +356,12 @@ describe('retail handle()', { skip: SKIP }, () => {
       const altered = JSON.stringify({ event: 'payment.succeeded', amount: 999999 });
       const response = await post({ 'x-signature': signature }, altered);
       assert.equal(response.status, 401);
+    });
+
+    it('signs the bytes as they arrived, not a re-serialised object', async () => {
+      const spaced = '{ "event" : "payment.succeeded" }';
+      const response = await post({ 'x-signature': sign(spaced) }, spaced);
+      assert.equal(response.status, 200);
     });
 
     it('401s a missing signature', async () => {
@@ -385,16 +405,35 @@ describe('retail handle()', { skip: SKIP }, () => {
 
     it('exempts /health', async () => {
       process.env.ALLOWED_CIDRS = '10.0.0.0/8';
-      const response = await handle(request({ path: '/health', sourceIp: '203.0.113.9' }));
+      const response = await call('/health', { sourceIp: '203.0.113.9' });
       assert.equal(response.status, 200);
     });
 
     it('blocks the webhook too', async () => {
       process.env.ALLOWED_CIDRS = '10.0.0.0/8';
-      const response = await handle(
-        request({ method: 'POST', path: '/webhooks/payment', sourceIp: '203.0.113.9', rawBody: '{}', body: {} }),
-      );
+      const response = await call('/webhooks/payment', {
+        method: 'POST',
+        rawBody: '{}',
+        sourceIp: '203.0.113.9',
+      });
       assert.equal(response.status, 403);
+    });
+
+    it('reads the caller from the first x-forwarded-for hop', async () => {
+      process.env.ALLOWED_CIDRS = '10.0.0.0/8';
+      const response = await call('/nope', {
+        headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1' },
+        sourceIp: '10.0.0.1',
+      });
+      assert.equal(response.status, 403);
+      assert.equal(response.body.sourceIp, '203.0.113.9');
+    });
+
+    it('normalises an IPv4-mapped IPv6 socket address', async () => {
+      process.env.ALLOWED_CIDRS = '10.0.0.0/8';
+      const response = await call('/nope', { sourceIp: '::ffff:203.0.113.9' });
+      assert.equal(response.status, 403);
+      assert.equal(response.body.sourceIp, '203.0.113.9');
     });
   });
 });
