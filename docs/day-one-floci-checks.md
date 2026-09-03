@@ -50,7 +50,13 @@ Everything below was observed, not read from docs. Throwaway commands, not kept.
 | Assumed role with `ReceiveMessage` on the exact queue ARN | `AccessDeniedException` |
 | Queue policy `Deny` (resource-based) under enforcement | Still allowed |
 
-So enforcement is action-level for SQS. Resource ARNs in identity policies do not match SQS requests. The filter's own comment says resource-based policies are out of scope.
+Cause, from floci's own log line:
+
+```
+IamEnforcementFilter IAM enforcement DENY: akid=AKIA… action=sqs:SendMessage resource=arn:aws:sqs:eu-west-1:000000000000:*
+```
+
+The filter resolves every SQS request (JSON protocol, as AWS CLI v2 and SDK v3 send it) to the wildcard queue ARN, so a policy naming a queue never matches and `Resource: "arn:aws:sqs:eu-west-1:000000000000:*"` or `"*"` is the narrowest allow that works. `ResourceArnBuilder.buildSqsArn` in the floci source reads `QueueUrl` from query, form or JSON body and falls back to `*`; on this build the JSON path is not reached. So enforcement is action-level for SQS. The filter's Javadoc also says resource-based policies are not supplied to it.
 
 ## Not working
 
