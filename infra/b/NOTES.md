@@ -37,8 +37,8 @@ Timings on this machine, from an empty floci:
 | Step | Wall clock |
 |---|---|
 | `make up ARCH=b` | 6 s |
-| `make bootstrap ARCH=b` | 12 s (96 s on the run that pulled the CDK CLI) |
-| `make deploy ARCH=b`, five stacks | 46 s, of which 38 s is CDK |
+| `make bootstrap ARCH=b` | 12 to 18 s (96 s on the run that pulled the CDK CLI) |
+| `make deploy ARCH=b`, five stacks | 43 s, of which 33 s is CDK |
 | `make e2e ARCH=b`, 7 tests | 6.6 s |
 | `make conformance ARCH=b`, 24 tests | 2.1 s |
 | `cdk destroy RetailApp PharmacyApp` | 27 s |
