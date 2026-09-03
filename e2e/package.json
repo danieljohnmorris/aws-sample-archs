@@ -1,0 +1,17 @@
+{
+  "name": "ftw-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One scenario, run against ARCH=local, a, b or c.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch-logs": "^3.658.0",
+    "pg": "^8.13.0"
+  }
+}

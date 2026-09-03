@@ -1,0 +1,24 @@
+{
+  "name": "ftw-retail",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Retail service. Runs as a Lambda handler and as a container.",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/app.mjs",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/client-eventbridge": "^3.658.0",
+    "@aws-sdk/client-sqs": "^3.658.0",
+    "@aws-sdk/credential-provider-node": "^3.658.0",
+    "@smithy/protocol-http": "^4.1.0",
+    "@smithy/signature-v4": "^4.1.0",
+    "pg": "^8.13.0"
+  }
+}
