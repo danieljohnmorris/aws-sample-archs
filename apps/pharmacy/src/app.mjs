@@ -1,86 +1,82 @@
-// Pharmacy HTTP surface. One handle() for both entrypoints, per CONTRACT.md.
+// Pharmacy HTTP surface. One Hono app serves both entrypoints, per CONTRACT.md:
+// src/lambda.mjs hands it API Gateway events, src/server.mjs hands it a socket.
+import { Hono } from 'hono';
 import { allowlistCheck, normaliseIp } from './allowlist.mjs';
 import { correlationIdFrom, logEvent, logRequest } from './log.mjs';
 import { checkPrescription, seedPrescription } from './prescriptions.mjs';
 
 const SERVICE = 'pharmacy';
 
+export const app = new Hono();
+
 /**
- * request:  { method, path, query, headers, body, rawBody, sourceIp }
- * response: { status, headers, body }
+ * Correlation id, the access log line, and the two headers every response
+ * carries. Registered first so it wraps the allowlist and the 404 as well.
  */
-export async function handle(request) {
+app.use('*', async (c, next) => {
   const started = Date.now();
-  const correlationId = correlationIdFrom(request.headers);
-  let response;
-  try {
-    response = await route(request, correlationId);
-  } catch (err) {
-    logEvent('error', 'unhandled', {
-      correlationId,
-      path: request.path,
-      error: err.message,
-      stack: err.stack,
-    });
-    response = { status: 500, body: { error: 'internal_error' } };
-  }
-  const headers = {
-    'content-type': 'application/json',
-    'x-correlation-id': correlationId,
-    ...(response.headers || {}),
-  };
+  const correlationId = correlationIdFrom(c.req.header());
+  c.set('correlationId', correlationId);
+  c.set('sourceIp', sourceIpOf(c));
+
+  await next();
+
+  c.res.headers.set('content-type', 'application/json');
+  c.res.headers.set('x-correlation-id', correlationId);
   logRequest({
-    method: request.method,
-    path: request.path,
-    status: response.status,
+    method: c.req.method,
+    path: c.req.path,
+    status: c.res.status,
     ms: Date.now() - started,
     correlationId,
-    sourceIp: normaliseIp(request.sourceIp),
+    sourceIp: normaliseIp(c.get('sourceIp')),
   });
-  return { status: response.status, headers, body: response.body };
-}
+});
 
-async function route(request, correlationId) {
-  const { method, path } = request;
+/** ALLOWED_CIDRS gate. /health is exempt, so health checks keep working. */
+app.use('*', async (c, next) => {
+  const blocked = allowlistCheck(
+    { path: c.req.path, sourceIp: c.get('sourceIp') },
+    process.env.ALLOWED_CIDRS,
+  );
+  if (blocked) return c.json(blocked.body, blocked.status);
+  await next();
+});
 
-  if (method === 'GET' && path === '/health') {
-    return { status: 200, body: { ok: true, service: SERVICE } };
-  }
+app.onError((err, c) => {
+  logEvent('error', 'unhandled', {
+    correlationId: c.get('correlationId'),
+    path: c.req.path,
+    error: err.message,
+    stack: err.stack,
+  });
+  return c.json({ error: 'internal_error' }, 500);
+});
 
-  const blocked = allowlistCheck(request, process.env.ALLOWED_CIDRS);
-  if (blocked) return blocked;
+app.notFound((c) => c.json({ error: 'not_found', path: c.req.path }, 404));
 
-  if (method === 'POST' && path === '/prescriptions') {
-    return postPrescription(request, correlationId);
-  }
+app.get('/health', (c) => c.json({ ok: true, service: SERVICE }));
 
-  const check = path.match(/^\/prescriptions\/([^/]+)\/check$/);
-  if (method === 'GET' && check) {
-    return getCheck(decodeURIComponent(check[1]), request, correlationId);
-  }
-
-  return { status: 404, body: { error: 'not_found', path } };
-}
-
-async function postPrescription(request, correlationId) {
-  const body = request.body || {};
+app.post('/prescriptions', async (c) => {
+  const correlationId = c.get('correlationId');
+  const body = (await jsonBody(c)) || {};
   const missing = ['prescriptionId', 'customerId', 'sku', 'expiresAt'].filter((field) => !body[field]);
-  if (missing.length > 0) {
-    return { status: 400, body: { error: 'invalid_request', missing } };
-  }
+  if (missing.length > 0) return c.json({ error: 'invalid_request', missing }, 400);
   if (Number.isNaN(new Date(body.expiresAt).getTime())) {
-    return { status: 400, body: { error: 'invalid_request', field: 'expiresAt' } };
+    return c.json({ error: 'invalid_request', field: 'expiresAt' }, 400);
   }
   await seedPrescription(body);
   logEvent('info', 'prescription seeded', { correlationId, prescriptionId: body.prescriptionId });
-  return { status: 201, body: { prescriptionId: body.prescriptionId } };
-}
+  return c.json({ prescriptionId: body.prescriptionId }, 201);
+});
 
-async function getCheck(prescriptionId, request, correlationId) {
-  const customerId = request.query?.customerId;
-  const sku = request.query?.sku;
+app.get('/prescriptions/:id/check', async (c) => {
+  const correlationId = c.get('correlationId');
+  const prescriptionId = c.req.param('id');
+  const customerId = c.req.query('customerId');
+  const sku = c.req.query('sku');
   if (!customerId || !sku) {
-    return { status: 400, body: { error: 'invalid_request', missing: ['customerId', 'sku'] } };
+    return c.json({ error: 'invalid_request', missing: ['customerId', 'sku'] }, 400);
   }
   const result = await checkPrescription({ prescriptionId, customerId, sku });
   logEvent('info', 'prescription checked', {
@@ -89,6 +85,43 @@ async function getCheck(prescriptionId, request, correlationId) {
     valid: result.valid,
     reason: result.reason,
   });
-  const body = result.valid ? { valid: true } : { valid: false, reason: result.reason };
-  return { status: 200, body };
+  return c.json(result.valid ? { valid: true } : { valid: false, reason: result.reason });
+});
+
+/**
+ * Lambda puts the caller's address on the event, the container puts it on the
+ * socket. Behind an ALB or API Gateway the first x-forwarded-for hop is the
+ * real caller, which is also the fallback when an event carries no address.
+ */
+function sourceIpOf(c) {
+  const event = c.env?.event;
+  if (event) {
+    const context = event.requestContext;
+    const fromEvent = context?.http?.sourceIp ?? context?.identity?.sourceIp;
+    return fromEvent || firstForwardedHop(c) || '';
+  }
+  return firstForwardedHop(c) || c.env?.incoming?.socket?.remoteAddress || '';
 }
+
+function firstForwardedHop(c) {
+  const forwarded = c.req.header('x-forwarded-for');
+  if (!forwarded) return '';
+  return forwarded.split(',')[0].trim();
+}
+
+/** The parsed JSON body, or null when there is none and when it will not parse. */
+async function jsonBody(c) {
+  return parseJson(await c.req.text());
+}
+
+function parseJson(raw) {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export default app;

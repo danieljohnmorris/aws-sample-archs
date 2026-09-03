@@ -1,8 +1,11 @@
 // API Gateway proxy entrypoint. Handles REST v1 events and HTTP API v2
 // payload 2.0 events, and re-exports the SQS consumer for architecture B.
-import { handle } from './app.mjs';
+import { handle } from 'hono/aws-lambda';
+import { app } from './app.mjs';
 
 export { sqsHandler } from './consumer.mjs';
+
+const honoHandler = handle(app);
 
 /** Payload 2.0 announces itself; REST v1 does not. */
 export function isV2(event) {
@@ -18,81 +21,83 @@ export function stripStage(path, stage) {
   return path || '/';
 }
 
-/** Flattens a proxy event into the request shape from CONTRACT.md. */
-export function toRequest(event) {
-  const v2 = isV2(event);
-  const headers = lowercaseHeaders(event?.headers, event?.multiValueHeaders);
-  const rawBody = decodeBody(event);
-  const method = v2 ? event.requestContext.http.method : event.httpMethod;
-  const path = v2
-    ? stripStage(event.rawPath || event.requestContext.http.path, event.requestContext?.stage)
-    : event.path || '/';
-  const sourceIp = v2
-    ? event.requestContext?.http?.sourceIp
-    : event.requestContext?.identity?.sourceIp;
+export async function handler(event, context) {
+  return toProxyResponse(await honoHandler(normalise(event), context));
+}
 
+/**
+ * API Gateway describes one request in several overlapping fields, and the
+ * adapter reads only some of them: rawPath and rawQueryString on a v2 event,
+ * both header maps at once on a v1 event. So the event is put in one shape
+ * first, matching what this service read before Hono:
+ *
+ * - the stage comes off a v2 path
+ * - the two header maps become one, the single-value map winning
+ * - the two query maps become one query string, the last value of a repeated
+ *   key winning
+ */
+function normalise(event) {
+  const query = new URLSearchParams(buildQuery(event)).toString();
+  if (isV2(event)) {
+    const rawPath = event.rawPath || event.requestContext?.http?.path || '/';
+    return {
+      ...event,
+      rawPath: stripStage(rawPath, event.requestContext?.stage),
+      rawQueryString: query,
+    };
+  }
+  const { multiValueHeaders, multiValueQueryStringParameters, ...rest } = event || {};
   return {
-    method: (method || 'GET').toUpperCase(),
-    path: path || '/',
-    query: buildQuery(event, v2),
-    headers,
-    body: parseJson(rawBody),
-    rawBody,
-    sourceIp: sourceIp || headers['x-forwarded-for']?.split(',')[0]?.trim() || '',
+    ...rest,
+    headers: buildHeaders(event),
+    queryStringParameters: Object.fromEntries(new URLSearchParams(query)),
   };
 }
 
-/** Back to the proxy response shape. Identical for v1 and v2. */
-export function toProxyResponse(response) {
-  return {
-    statusCode: response.status,
-    headers: response.headers || { 'content-type': 'application/json' },
-    body: JSON.stringify(response.body ?? {}),
-    isBase64Encoded: false,
-  };
-}
-
-export async function handler(event) {
-  return toProxyResponse(await handle(toRequest(event)));
-}
-
-function lowercaseHeaders(headers, multiValueHeaders) {
+function buildHeaders(event) {
   const out = {};
-  for (const [key, value] of Object.entries(multiValueHeaders || {})) {
+  for (const [key, value] of Object.entries(event?.multiValueHeaders || {})) {
+    if (value === undefined || value === null) continue;
     out[key.toLowerCase()] = Array.isArray(value) ? value.join(',') : value;
   }
-  for (const [key, value] of Object.entries(headers || {})) {
+  for (const [key, value] of Object.entries(event?.headers || {})) {
+    if (value === undefined || value === null) continue;
     out[key.toLowerCase()] = Array.isArray(value) ? value.join(',') : value;
   }
   return out;
 }
 
-function buildQuery(event, v2) {
+function buildQuery(event) {
   const query = {};
-  if (v2 && typeof event.rawQueryString === 'string' && event.rawQueryString.length > 0) {
+  if (isV2(event) && typeof event.rawQueryString === 'string' && event.rawQueryString.length > 0) {
     for (const [key, value] of new URLSearchParams(event.rawQueryString)) query[key] = value;
     return query;
   }
   for (const [key, value] of Object.entries(event?.multiValueQueryStringParameters || {})) {
+    if (value === undefined || value === null) continue;
     query[key] = Array.isArray(value) ? value[value.length - 1] : value;
   }
   for (const [key, value] of Object.entries(event?.queryStringParameters || {})) {
+    if (value === undefined || value === null) continue;
     query[key] = value;
   }
   return query;
 }
 
-function decodeBody(event) {
-  if (event?.body === undefined || event?.body === null) return '';
-  return event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : String(event.body);
-}
-
-function parseJson(raw) {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
+/**
+ * One proxy response shape for both payload versions, as before: a plain
+ * headers map and never base64. The adapter answers an event carrying
+ * multiValueHeaders in kind, so that form is folded back.
+ */
+function toProxyResponse(result) {
+  const headers = { ...(result.headers || {}) };
+  for (const [key, value] of Object.entries(result.multiValueHeaders || {})) {
+    headers[key] = Array.isArray(value) ? value.join(',') : value;
   }
+  return {
+    statusCode: result.statusCode,
+    headers,
+    body: result.body ?? '{}',
+    isBase64Encoded: result.isBase64Encoded ?? false,
+  };
 }
