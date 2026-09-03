@@ -32,7 +32,7 @@ export class PharmacyAppStack extends cdk.Stack {
 
     const { vpc, appSg, dbPort } = importBase(this, 'pharmacy');
     const role = importServiceRole(this, 'pharmacy');
-    const asset = serviceAssetDir('pharmacy');
+    const assetDir = serviceAssetDir('pharmacy');
 
     const queueEnv = {
       SERVICE_NAME: 'pharmacy',
@@ -47,7 +47,7 @@ export class PharmacyAppStack extends cdk.Stack {
       functionName: cfg.API_FUNCTION_NAME.pharmacy,
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'src/lambda.handler',
-      code: lambda.Code.fromAsset(asset.dir),
+      code: lambda.Code.fromAsset(assetDir, { exclude: ['test'] }),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [appSg],
@@ -75,11 +75,19 @@ export class PharmacyAppStack extends cdk.Stack {
       ssmString(this, 'PharmacySecretAccessKeyParam', cfg.SVC_KEY_PARAM.secretAccessKey),
     );
     cfnSeed.addPropertyOverride('Environment.Variables.AWS_SESSION_TOKEN', '');
+    cfnSeed.addPropertyOverride('Environment.Variables.AWS_REGION', cfg.REGION);
 
     const httpApi = new apigwv2.HttpApi(this, 'PharmacyApi', { apiName: `${cfg.PREFIX}-pharmacy` });
     const integration = new integrations.HttpLambdaIntegration('SeedIntegration', seed);
     httpApi.addRoutes({ path: '/health', methods: [apigwv2.HttpMethod.GET], integration });
     httpApi.addRoutes({ path: '/prescriptions', methods: [apigwv2.HttpMethod.POST], integration });
+    // Seeding a prescription and reading it back is how the scenario checks
+    // the seed landed. Retail never calls this: it asks over the queue.
+    httpApi.addRoutes({
+      path: '/prescriptions/{id}/check',
+      methods: [apigwv2.HttpMethod.GET],
+      integration,
+    });
 
     const workerLogGroup = new logs.LogGroup(this, 'WorkerLogGroup', {
       logGroupName: `/${cfg.PREFIX}/pharmacy-worker`,
@@ -124,6 +132,8 @@ export class PharmacyAppStack extends cdk.Stack {
       environment: {
         ...queueEnv,
         PORT: '8080',
+        // Inside the compose network floci always listens on 4566, whatever
+        // the host port mapping says.
         AWS_ENDPOINT_URL: cfg.FLOCI_INTERNAL_ENDPOINT,
         AWS_REGION: cfg.REGION,
         AWS_DEFAULT_REGION: cfg.REGION,

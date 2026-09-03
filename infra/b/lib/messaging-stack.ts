@@ -1,10 +1,12 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import * as path from 'node:path';
 import * as cfg from './config';
 
 /**
@@ -51,31 +53,75 @@ export class MessagingStack extends cdk.Stack {
     const retailRoleArn = cfg.roleArn('retail');
     const pharmacyRoleArn = cfg.roleArn('pharmacy');
 
+    // A Lambda that puts a queue policy on a queue with SetQueueAttributes.
+    // floci reports AWS::SQS::QueuePolicy as CREATE_COMPLETE and then serves
+    // the queue with no Policy attribute, so the declared policy is not
+    // readable. Both are created below: the CloudFormation resource is what
+    // works on AWS, this is what makes it observable here.
+    const policyApplierRole = new iam.Role(this, 'QueuePolicyApplierRole', {
+      roleName: `${cfg.PREFIX}-queue-policy-applier`,
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+    policyApplierRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['sqs:SetQueueAttributes', 'sqs:GetQueueAttributes'],
+      resources: [cfg.SQS_RESOURCE_UNDER_FLOCI],
+    }));
+    policyApplierRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [`arn:aws:logs:${cfg.REGION}:${cfg.ACCOUNT}:*`],
+    }));
+
+    const policyApplier = new lambda.Function(this, 'QueuePolicyApplier', {
+      functionName: `${cfg.PREFIX}-queue-policy-applier`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.resolve(__dirname, '..', 'custom-resources', 'queue-policy')),
+      role: policyApplierRole,
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    const applyPolicy = (id: string, queue: sqs.Queue, statements: iam.PolicyStatement[]) => {
+      const queuePolicy = new sqs.QueuePolicy(this, id, { queues: [queue] });
+      queuePolicy.document.addStatements(...statements);
+      new cdk.CustomResource(this, `${id}Apply`, {
+        serviceToken: policyApplier.functionArn,
+        properties: {
+          QueueUrl: queue.queueUrl,
+          Policy: cdk.Stack.of(this).toJsonString(queuePolicy.document.toJSON()),
+        },
+      });
+    };
+
     // CheckRequest: retail writes, pharmacy reads. CheckResult is the mirror.
-    request.queue.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'RetailSends',
-      principals: [new iam.ArnPrincipal(retailRoleArn)],
-      actions: ['sqs:SendMessage'],
-      resources: [request.queue.queueArn],
-    }));
-    request.queue.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'PharmacyConsumes',
-      principals: [new iam.ArnPrincipal(pharmacyRoleArn)],
-      actions: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
-      resources: [request.queue.queueArn],
-    }));
-    result.queue.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'PharmacySends',
-      principals: [new iam.ArnPrincipal(pharmacyRoleArn)],
-      actions: ['sqs:SendMessage'],
-      resources: [result.queue.queueArn],
-    }));
-    result.queue.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'RetailConsumes',
-      principals: [new iam.ArnPrincipal(retailRoleArn)],
-      actions: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
-      resources: [result.queue.queueArn],
-    }));
+    applyPolicy('CheckRequestQueuePolicy', request.queue, [
+      new iam.PolicyStatement({
+        sid: 'RetailSends',
+        principals: [new iam.ArnPrincipal(retailRoleArn)],
+        actions: ['sqs:SendMessage'],
+        resources: [request.queue.queueArn],
+      }),
+      new iam.PolicyStatement({
+        sid: 'PharmacyConsumes',
+        principals: [new iam.ArnPrincipal(pharmacyRoleArn)],
+        actions: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
+        resources: [request.queue.queueArn],
+      }),
+    ]);
+
+    applyPolicy('CheckResultQueuePolicy', result.queue, [
+      new iam.PolicyStatement({
+        sid: 'PharmacySends',
+        principals: [new iam.ArnPrincipal(pharmacyRoleArn)],
+        actions: ['sqs:SendMessage'],
+        resources: [result.queue.queueArn],
+      }),
+      new iam.PolicyStatement({
+        sid: 'RetailConsumes',
+        principals: [new iam.ArnPrincipal(retailRoleArn)],
+        actions: ['sqs:ReceiveMessage', 'sqs:DeleteMessage'],
+        resources: [result.queue.queueArn],
+      }),
+    ]);
 
     /**
      * Every SQS statement below uses arn:aws:sqs:eu-west-2:000000000000:*

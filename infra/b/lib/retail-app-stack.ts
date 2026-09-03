@@ -25,10 +25,12 @@ export class RetailAppStack extends cdk.Stack {
 
     const { vpc, appSg, dbPort } = importBase(this, 'retail');
     const role = importServiceRole(this, 'retail');
-    const asset = serviceAssetDir('retail');
+    const assetDir = serviceAssetDir('retail');
 
     const environment: Record<string, string> = {
       SERVICE_NAME: 'retail',
+      // floci injects AWS_ENDPOINT_URL into Lambda containers. AWS_REGION is
+      // reserved, so it is set below on the CfnFunction.
       CHECK_REQUEST_QUEUE_URL: cfg.queueUrl(cfg.QUEUE.checkRequest),
       CHECK_RESULT_QUEUE_URL: cfg.queueUrl(cfg.QUEUE.checkResult),
       DATABASE_URL: cfg.databaseUrl('retail', dbPort, props.dbPassword),
@@ -43,7 +45,7 @@ export class RetailAppStack extends cdk.Stack {
       functionName: cfg.API_FUNCTION_NAME.retail,
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'src/lambda.handler',
-      code: lambda.Code.fromAsset(asset.dir),
+      code: lambda.Code.fromAsset(assetDir, { exclude: ['test'] }),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [appSg],
@@ -60,6 +62,9 @@ export class RetailAppStack extends cdk.Stack {
       proxy: true,
       deployOptions: { stageName: 'prod' },
     });
+    // The generated Endpoint output is the amazonaws.com URL, which does not
+    // answer on floci. RetailApiUrl below is the one that does.
+    rest.node.tryRemoveChild('Endpoint');
 
     // Retail's half of the conversation coming back. The consumer runs the
     // same asset under a different handler.
@@ -69,7 +74,7 @@ export class RetailAppStack extends cdk.Stack {
       functionName: `${cfg.PREFIX}-retail-result-consumer`,
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'src/lambda.sqsHandler',
-      code: lambda.Code.fromAsset(asset.dir),
+      code: lambda.Code.fromAsset(assetDir, { exclude: ['test'] }),
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [appSg],
@@ -84,11 +89,21 @@ export class RetailAppStack extends cdk.Stack {
       enabled: true,
     }));
 
+    // AWS_REGION is reserved, so CDK will not accept it in a Function's
+    // environment. The SDK inside the function reads it, and floci does not
+    // always set it, so it goes on to the CfnFunction directly.
+    for (const fn of [api, consumer]) {
+      (fn.node.defaultChild as lambda.CfnFunction)
+        .addPropertyOverride('Environment.Variables.AWS_REGION', cfg.REGION);
+    }
+
     new cdk.CfnOutput(this, 'RetailApiUrl', {
       key: 'RetailApiUrl',
-      // CDK writes the amazonaws.com form. floci serves REST APIs on its own
-      // host, so the URL that answers from the host machine is built here.
-      value: `http://${rest.restApiId}.execute-api.localhost.floci.io:${cfg.FLOCI_HOST_PORT}/prod`,
+      // floci serves a REST API at /restapis/<id>/<stage>/_user_request_ on its
+      // own port. The <id>.execute-api.localhost.floci.io form that works for
+      // an HTTP API is read as a virtual-host S3 bucket here and answers
+      // NoSuchBucket. Measured 2026-09-03; see infra/b/NOTES.md.
+      value: `${cfg.FLOCI_HOST_ENDPOINT}/restapis/${rest.restApiId}/prod/_user_request_`,
     });
     new cdk.CfnOutput(this, 'RetailLogGroup', { key: 'RetailLogGroup', value: cfg.LOG_GROUP_NAME.retail });
   }

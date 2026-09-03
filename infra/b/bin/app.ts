@@ -55,8 +55,8 @@ function main(): void {
     paymentWebhookSecret,
     description: 'Retail API Lambda, REST API and CheckResult consumer',
   });
-  retailApp.addDependency(retailBase);
-  retailApp.addDependency(messaging);
+  retailApp.addStackDependency(retailBase);
+  retailApp.addStackDependency(messaging);
 
   const pharmacyApp = new PharmacyAppStack(app, 'PharmacyApp', {
     env,
@@ -64,8 +64,8 @@ function main(): void {
     workerImage: process.env.PHARMACY_IMAGE ?? 'ftw-pharmacy:local',
     description: 'Pharmacy queue worker on Fargate and a seeding HTTP API',
   });
-  pharmacyApp.addDependency(pharmacyBase);
-  pharmacyApp.addDependency(messaging);
+  pharmacyApp.addStackDependency(pharmacyBase);
+  pharmacyApp.addStackDependency(messaging);
 
   app.synth();
 }

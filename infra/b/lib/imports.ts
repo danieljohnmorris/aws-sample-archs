@@ -37,13 +37,13 @@ export function importServiceRole(scope: Construct, service: cfg.Service): iam.I
 }
 
 /**
- * The real service if it has landed on main, otherwise the placeholder that
- * keeps the wiring deployable. Both expose src/lambda.mjs.
+ * The Lambda asset for a service: the app directory zipped whole, node_modules
+ * included, as the Makefile's deps target prepares it.
  */
-export function serviceAssetDir(service: cfg.Service): { dir: string; placeholder: boolean } {
-  const real = path.resolve(__dirname, '..', '..', '..', 'apps', service);
-  if (fs.existsSync(path.join(real, 'src', 'lambda.mjs'))) {
-    return { dir: real, placeholder: false };
+export function serviceAssetDir(service: cfg.Service): string {
+  const dir = path.resolve(__dirname, '..', '..', '..', 'apps', service);
+  if (!fs.existsSync(path.join(dir, 'node_modules'))) {
+    throw new Error(`${dir}/node_modules is missing. Run make deps first.`);
   }
-  return { dir: path.resolve(__dirname, '..', 'placeholder', service), placeholder: true };
+  return dir;
 }

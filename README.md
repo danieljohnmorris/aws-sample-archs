@@ -152,3 +152,47 @@ The request object carries two fields beyond the five the contract lists. `rawBo
 Pharmacy has a `processed_messages` table as well as `prescriptions`. The contract only lists it under retail, but architecture B makes pharmacy an SQS consumer and the contract requires consumers to dedupe on `idempotencyKey`.
 
 Pharmacy depends on `@aws-sdk/client-sqs`, for the same reason. It reads the request queue and writes to the result queue.
+
+## B. Queues between VPCs (`infra/b/`)
+
+Two VPCs with zero NAT gateways, so neither side has a route out. Retail puts a
+`PrescriptionCheckRequested` on `ftw-b-check-request`; a Fargate worker in the
+pharmacy VPC, with no load balancer and no inbound listener, reads it and
+answers on `ftw-b-check-result`; a second retail Lambda applies the result
+through an SQS event source mapping. `POST /orders` returns `PENDING` and the
+scenario polls. Both queues redrive to a dead letter queue at `maxReceiveCount`
+3, and redrive back is a manual `aws sqs start-message-move-task`.
+
+Five stacks. `RetailBase` and `PharmacyBase` hold a VPC each, the SQS, Secrets
+Manager and CloudWatch Logs interface endpoints, Postgres 16 in isolated
+subnets and a log group at 30 days, with termination protection on and RETAIN
+on the database. `Messaging` holds the queues, the KMS key, the two service
+roles and the two service users, outside both VPCs because SQS is regional.
+`RetailApp` and `PharmacyApp` hold everything that gets replaced.
+
+Nothing crosses a stack boundary as a CloudFormation export. The base stacks
+publish their ids as SSM parameters and the app stacks read them through
+`AWS::SSM::Parameter::Value<String>`, so destroying an app stack leaves the
+base untouched.
+
+```
+make up ARCH=b
+make bootstrap ARCH=b
+make deploy ARCH=b
+make e2e ARCH=b
+make conformance ARCH=b
+```
+
+`make deploy ARCH=b` runs once against a given floci. floci cannot create a
+read-only change set, so the CDK CLI issues an update on every stack it is
+asked about, and floci's update path re-creates Secrets Manager secrets and
+fails on the name. To change an app stack, destroy it and deploy it again with
+`--exclusively`. `infra/b/NOTES.md` has the commands, the timings, the IAM
+denials with their exact responses, and the rest of what floci does and does
+not do here.
+
+Identity is the part floci can actually enforce. This instance runs with
+`FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, so `retail-svc` sends to
+`ftw-b-check-request` and gets `AccessDeniedException` on `sqs:ReceiveMessage`,
+while `pharmacy-svc` consumes and replies. Queue policies name only the two
+role ARNs and are readable, but floci does not gate on them.

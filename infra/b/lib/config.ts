@@ -18,6 +18,9 @@ export const FLOCI_INTERNAL_ENDPOINT = 'http://floci:4566';
 /** Host-side port for this architecture's floci, from infra/b/.env. */
 export const FLOCI_HOST_PORT = process.env.FLOCI_PORT ?? '4576';
 
+/** Where a test on the host machine reaches this architecture's floci. */
+export const FLOCI_HOST_ENDPOINT = `http://localhost:${FLOCI_HOST_PORT}`;
+
 export type Service = 'retail' | 'pharmacy';
 
 export const QUEUE = {
