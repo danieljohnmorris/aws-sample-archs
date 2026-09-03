@@ -14,12 +14,17 @@ let sqsClient = null;
 let eventsClient = null;
 let signer = null;
 
+/** The region is whatever the environment says. Nothing here names one. */
 function region() {
-  return process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'eu-west-1';
+  return process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || undefined;
 }
 
 function clientConfig() {
-  const config = { region: region() };
+  const config = {};
+  // Left unset the SDK resolves the region itself, from the environment or the
+  // shared config file. Setting it to a literal would override that.
+  const configured = region();
+  if (configured) config.region = configured;
   if (process.env.AWS_ENDPOINT_URL) config.endpoint = process.env.AWS_ENDPOINT_URL;
   return config;
 }
@@ -46,9 +51,13 @@ export function signsRequests() {
 
 function getSigner() {
   if (!signer) {
+    const signingRegion = region();
+    if (!signingRegion) {
+      throw new Error('SIGN_REQUESTS is true but neither AWS_REGION nor AWS_DEFAULT_REGION is set');
+    }
     signer = new SignatureV4({
       service: 'execute-api',
-      region: region(),
+      region: signingRegion,
       credentials: defaultProvider(),
       sha256: Sha256,
     });

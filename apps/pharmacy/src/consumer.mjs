@@ -15,9 +15,11 @@ let running = false;
 
 function getClient() {
   if (!client) {
-    const config = {
-      region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'eu-west-1',
-    };
+    // Region left unset when the environment does not say, so the SDK resolves
+    // it the way it normally would. No region is named here.
+    const config = {};
+    const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+    if (region) config.region = region;
     if (process.env.AWS_ENDPOINT_URL) config.endpoint = process.env.AWS_ENDPOINT_URL;
     client = new SQSClient(config);
   }
