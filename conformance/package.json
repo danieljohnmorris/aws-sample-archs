@@ -1,0 +1,20 @@
+{
+  "name": "ftw-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reads deployed configuration back through the SDK and asserts the invariants in CONTRACT.md.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-api-gateway": "^3.658.0",
+    "@aws-sdk/client-ec2": "^3.658.0",
+    "@aws-sdk/client-eventbridge": "^3.658.0",
+    "@aws-sdk/client-sqs": "^3.658.0",
+    "@aws-sdk/client-wafv2": "^3.658.0"
+  }
+}
