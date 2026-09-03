@@ -152,3 +152,56 @@ The request object carries two fields beyond the five the contract lists. `rawBo
 Pharmacy has a `processed_messages` table as well as `prescriptions`. The contract only lists it under retail, but architecture B makes pharmacy an SQS consumer and the contract requires consumers to dedupe on `idempotencyKey`.
 
 Pharmacy depends on `@aws-sdk/client-sqs`, for the same reason. It reads the request queue and writes to the result queue.
+
+## Architecture A: perimeter and addresses
+
+Four stacks, in `infra/a/`. `RetailBase` and `PharmacyBase` hold one VPC each with
+public, private-with-egress and isolated tiers across two zones, one NAT gateway
+on a retained elastic IP, a Postgres 16 `db.t3.micro` in the isolated tier that
+only the application security group can reach on 5432, and a log group. Both
+carry termination protection and retain the database on delete. `RetailApp` runs
+retail on Lambda behind a REST API. `PharmacyApp` runs pharmacy on Fargate behind
+an internal ALB and an HTTP API.
+
+The split is deliberate. In this architecture a caller is identified by the
+public address its traffic leaves from, so that address has to outlive the
+application. The elastic IP is allocated in the base stack, and destroying and
+redeploying an app stack leaves the other side's allowlist correct. That was
+tested: both NAT addresses came back unchanged, and the rows written before the
+teardown were still in the database afterwards.
+
+Nothing crosses between stacks through a CloudFormation export. Base stacks
+publish VPC id, subnet ids, security group ids, the NAT address, the database
+endpoint and the secret ARN to SSM, and app stacks read them back through
+template parameters CloudFormation resolves at deploy time. An export in use
+cannot be changed, which would freeze the base stacks while the app stacks are
+up.
+
+Each side blocks the other's absence at three layers: a REGIONAL Web ACL on the
+API stage that blocks by default and allows one IP set, an API Gateway resource
+policy keyed on `aws:SourceIp` for retail, and `ALLOWED_CIDRS` inside the
+application. All three name the same addresses. Only the third one can be watched
+rejecting a request under floci.
+
+```sh
+make up ARCH=a
+make bootstrap ARCH=a
+make deploy ARCH=a
+make e2e ARCH=a
+make conformance ARCH=a
+```
+
+`infra/a/.env` carries two values the stacks read, `DB_PASSWORD` and
+`PAYMENT_WEBHOOK_SECRET`. Both are fixtures for a throwaway emulator, and both
+exist because floci hands a Lambda or a task the literal
+`{{resolve:secretsmanager:…}}` string rather than the value behind it. Neither is
+set on AWS, where the stacks generate the values and pass the reference.
+
+Two switches change the shape of the output for a real deployment. `WAF_SDK_SHIM=off`
+replaces the custom resource that builds the IP set with the plain
+`AWS::WAFv2::IPSet` and `AWS::WAFv2::WebACLAssociation` resources, which floci
+accepts and does not act on. Clearing `ALB_INTEGRATION_HOST` points the HTTP API
+integration at the load balancer's DNS name instead of at floci.
+
+`infra/a/NOTES.md` records what was run, how long each deploy took, what survived
+the teardown, and fourteen places floci behaves differently from AWS.
