@@ -205,3 +205,34 @@ integration at the load balancer's DNS name instead of at floci.
 
 `infra/a/NOTES.md` records what was run, how long each deploy took, what survived
 the teardown, and fourteen places floci behaves differently from AWS.
+
+## Architecture C, identity over addresses
+
+`infra/c/` is a CDK app in TypeScript, four stacks. `SharedBase` holds the VPC,
+the security groups and the two databases, and carries termination protection.
+`Events` holds the `orders` bus and the audit queue. `PharmacyApp` and
+`RetailApp` are the two that get destroyed and redeployed. Destroying both
+leaves the VPC, both security-group sets, both Postgres instances, the bus and
+all three queues in place.
+
+The VPC has no NAT gateways, no internet gateway and no route to `0.0.0.0/0`.
+Traffic to AWS goes through six interface endpoints and the S3 gateway
+endpoint. Every ingress rule names a security group; none names a CIDR. The
+retail Lambda has one identity, `ftw-c-retail-lambda`, and that role ARN is the
+only principal the pharmacy API's resource policy allows.
+
+Two things about running it on floci, both written up in
+[infra/c/NOTES.md](infra/c/NOTES.md).
+
+floci's CloudFormation cannot update a stack. `make deploy ARCH=c` works once on
+a fresh floci. After that, replace the app stacks with
+`cdk destroy --exclusively RetailApp PharmacyApp` and
+`cdk deploy --exclusively PharmacyApp RetailApp`, which is what keeps CDK from
+re-submitting `SharedBase` as a dependency. Delete the IAM user
+`ftw-c-retail-svc` in between, because floci does not remove it with the stack.
+
+`infra/c/.env` carries `DB_PASSWORD` and `PAYMENT_WEBHOOK_SECRET`. floci does
+not resolve `{{resolve:secretsmanager:...}}`, so a generated secret reaches the
+Lambda as literal placeholder text and every database connection and signature
+check fails. The stacks read both values at synth and still write them to
+Secrets Manager.
