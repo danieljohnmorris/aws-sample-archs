@@ -1,0 +1,23 @@
+{
+  "name": "ftw-infra-b",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "ftw-infra-b": "bin/app.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "synth": "npx aws-cdk@2.1139.0 synth"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.6.3"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1125.0",
+    "@aws-sdk/client-ssm": "^3.699.0",
+    "aws-cdk-lib": "^2.268.0",
+    "constructs": "^10.4.2"
+  }
+}
