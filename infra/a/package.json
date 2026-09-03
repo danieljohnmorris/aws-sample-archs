@@ -1,0 +1,20 @@
+{
+  "name": "ftw-infra-a",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Architecture A: perimeter and addresses. Two VPCs, NAT EIPs, WAF IP allowlists, API Gateway.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "synth": "npx aws-cdk@2.1139.0 synth"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@aws-sdk/client-ssm": "^3.700.0",
+    "aws-cdk-lib": "^2.268.0",
+    "constructs": "^10.4.2"
+  }
+}
