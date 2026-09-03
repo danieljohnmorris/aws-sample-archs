@@ -7,7 +7,7 @@ ENV  := infra/$(ARCH)/.env
 -include $(ENV)
 export
 
-.PHONY: test-deps destroy-apps up down logs deps images bootstrap deploy destroy unit e2e conformance
+.PHONY: test-deps destroy-apps infra-deps up down logs deps images bootstrap deploy destroy unit e2e conformance
 
 up:
 	docker compose --env-file $(ENV) up -d --wait
@@ -21,7 +21,7 @@ logs:
 
 # Lambda assets are the app directories zipped whole, node_modules included.
 # The AWS SDK stays in dependencies rather than relying on the runtime copy.
-deps: test-deps
+deps: test-deps infra-deps
 	cd apps/retail && npm ci --omit=dev
 	cd apps/pharmacy && npm ci --omit=dev
 
@@ -60,3 +60,6 @@ destroy-apps:
 
 deploy-apps: deps
 	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 deploy --exclusively PharmacyApp RetailApp --require-approval never --outputs-file outputs.json
+
+infra-deps:
+	cd infra/$(ARCH) && npm ci --silent
