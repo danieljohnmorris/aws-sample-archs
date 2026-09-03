@@ -2,7 +2,7 @@
 
 Three ways to wire the same two services on AWS, all running locally on [floci](https://github.com/floci-io/floci).
 
-Two articles go with this repo. Part one, [floci: which parts of AWS actually run locally](https://danieljohnmorris.com/writing/floci-local-aws-what-runs-for-real/), is the emulator. Part two, [three AWS architectures, one emulator](https://danieljohnmorris.com/writing/three-aws-architectures-one-emulator/), is the comparison. This repo holds the code both describe.
+Two articles go with this repo. Part one, [floci: which parts of AWS run locally for real](https://danieljohnmorris.com/writing/floci-local-aws-what-runs-for-real/), is the emulator. Part two, [three AWS architectures, one emulator](https://danieljohnmorris.com/writing/three-aws-architectures-one-emulator/), is the comparison. This repo holds the code both describe.
 
 Two services, `retail` and `pharmacy`. One scenario: a customer orders a prescription-only item, retail asks pharmacy to confirm a current prescription, pharmacy answers, retail fulfils or rejects. Same end-to-end test against each architecture.
 
