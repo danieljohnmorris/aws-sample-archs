@@ -333,6 +333,10 @@ which bypasses enforcement.
 - `make down ARCH=c` removes the network before the filter that cleans up
   `floci-*` containers can match on it, so a few are left running.
 
+### An updated PharmacyApp points its listener at an empty target group
+
+Observed once, after `cdk deploy --exclusively PharmacyApp RetailApp` was run against a floci that already held both stacks. floci reported `UPDATE_COMPLETE`, but the ALB listener's default action named a target group (`…-fa438495`) that was not the one holding the healthy task (`…-71b44655`). The HTTP API answered `No targets available`, 503, and every order step failed. `describe-target-health` on the old group still showed one healthy target. Destroying both app stacks, removing the stray `floci-ecs-*` containers on `ftw-c_default`, deleting the leftover IAM user and deploying again fixed it. Do not update PharmacyApp in place on floci.
+
 ### Smaller things
 
 - CDK's `Vpc` accepts `natGateways: 0` alongside `PRIVATE_WITH_EGRESS` subnets

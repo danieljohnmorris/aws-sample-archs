@@ -52,11 +52,20 @@ One floci per architecture, so the three do not collide. Ports and project names
 ```sh
 make up ARCH=a                 # start floci for architecture A
 make bootstrap ARCH=a          # once per architecture
-make deploy ARCH=a             # build images, then cdk deploy --all
+make deploy ARCH=a             # deps, images, cdk deploy --all, outputs.json
 make e2e ARCH=a                # the scenario against the deployed stacks
 make conformance ARCH=a        # read the config back and assert
 make down ARCH=a
 ```
+
+floci cannot update a CloudFormation stack, so `make deploy` works once per fresh instance. To pick up a code change, replace the two app stacks and leave the base stacks, and their databases, alone:
+
+```sh
+make destroy-apps ARCH=a       # cdk destroy --exclusively RetailApp PharmacyApp
+make deploy-apps ARCH=a        # cdk deploy --exclusively PharmacyApp RetailApp, then rebuild outputs.json
+```
+
+Architecture C also needs `aws iam delete-user --user-name ftw-c-retail-svc` between the two, after removing its key and policy, because floci leaves the user behind. `scripts/outputs.sh <arch>` rebuilds `outputs.json` from every deployed stack at any time.
 
 Either service also runs on its own:
 
