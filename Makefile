@@ -33,7 +33,8 @@ bootstrap:
 	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 bootstrap aws://$(CDK_DEFAULT_ACCOUNT)/$(CDK_DEFAULT_REGION)
 
 deploy: deps images
-	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 deploy --all --require-approval never --outputs-file outputs.json
+	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 deploy --all --require-approval never
+	./scripts/outputs.sh $(ARCH)
 
 destroy:
 	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 destroy --all --force
@@ -59,7 +60,8 @@ destroy-apps:
 	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 destroy --exclusively RetailApp PharmacyApp --force
 
 deploy-apps: deps
-	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 deploy --exclusively PharmacyApp RetailApp --require-approval never --outputs-file outputs.json
+	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 deploy --exclusively PharmacyApp RetailApp --require-approval never
+	./scripts/outputs.sh $(ARCH)
 
 infra-deps:
 	cd infra/$(ARCH) && npm ci --silent
