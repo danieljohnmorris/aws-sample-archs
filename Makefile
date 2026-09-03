@@ -7,7 +7,7 @@ ENV  := infra/$(ARCH)/.env
 -include $(ENV)
 export
 
-.PHONY: up down logs deps images bootstrap deploy destroy unit e2e conformance
+.PHONY: test-deps destroy-apps up down logs deps images bootstrap deploy destroy unit e2e conformance
 
 up:
 	docker compose --env-file $(ENV) up -d --wait
@@ -21,7 +21,7 @@ logs:
 
 # Lambda assets are the app directories zipped whole, node_modules included.
 # The AWS SDK stays in dependencies rather than relying on the runtime copy.
-deps:
+deps: test-deps
 	cd apps/retail && npm ci --omit=dev
 	cd apps/pharmacy && npm ci --omit=dev
 
@@ -47,3 +47,16 @@ e2e:
 
 conformance:
 	cd conformance && ARCH=$(ARCH) node --test
+
+# e2e/ and conformance/ carry their own dependencies.
+test-deps:
+	cd e2e && npm ci --silent
+	cd conformance && npm ci --silent
+
+# floci cannot update a stack, so redeploying means destroying the app stacks
+# first. --exclusively keeps the base stacks, and their databases, out of it.
+destroy-apps:
+	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 destroy --exclusively RetailApp PharmacyApp --force
+
+deploy-apps: deps
+	cd infra/$(ARCH) && npx aws-cdk@2.1139.0 deploy --exclusively PharmacyApp RetailApp --require-approval never --outputs-file outputs.json
