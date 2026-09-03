@@ -154,3 +154,131 @@ The request object carries two fields beyond the five the contract lists. `rawBo
 Pharmacy has a `processed_messages` table as well as `prescriptions`. The contract only lists it under retail, but architecture B makes pharmacy an SQS consumer and the contract requires consumers to dedupe on `idempotencyKey`.
 
 Pharmacy depends on `@aws-sdk/client-sqs`, for the same reason. It reads the request queue and writes to the result queue.
+
+## Architecture A: perimeter and addresses
+
+Four stacks, in `infra/a/`. `RetailBase` and `PharmacyBase` hold one VPC each with
+public, private-with-egress and isolated tiers across two zones, one NAT gateway
+on a retained elastic IP, a Postgres 16 `db.t3.micro` in the isolated tier that
+only the application security group can reach on 5432, and a log group. Both
+carry termination protection and retain the database on delete. `RetailApp` runs
+retail on Lambda behind a REST API. `PharmacyApp` runs pharmacy on Fargate behind
+an internal ALB and an HTTP API.
+
+The split is deliberate. In this architecture a caller is identified by the
+public address its traffic leaves from, so that address has to outlive the
+application. The elastic IP is allocated in the base stack, and destroying and
+redeploying an app stack leaves the other side's allowlist correct. That was
+tested: both NAT addresses came back unchanged, and the rows written before the
+teardown were still in the database afterwards.
+
+Nothing crosses between stacks through a CloudFormation export. Base stacks
+publish VPC id, subnet ids, security group ids, the NAT address, the database
+endpoint and the secret ARN to SSM, and app stacks read them back through
+template parameters CloudFormation resolves at deploy time. An export in use
+cannot be changed, which would freeze the base stacks while the app stacks are
+up.
+
+Each side blocks the other's absence at three layers: a REGIONAL Web ACL on the
+API stage that blocks by default and allows one IP set, an API Gateway resource
+policy keyed on `aws:SourceIp` for retail, and `ALLOWED_CIDRS` inside the
+application. All three name the same addresses. Only the third one can be watched
+rejecting a request under floci.
+
+```sh
+make up ARCH=a
+make bootstrap ARCH=a
+make deploy ARCH=a
+make e2e ARCH=a
+make conformance ARCH=a
+```
+
+`infra/a/.env` carries two values the stacks read, `DB_PASSWORD` and
+`PAYMENT_WEBHOOK_SECRET`. Both are fixtures for a throwaway emulator, and both
+exist because floci hands a Lambda or a task the literal
+`{{resolve:secretsmanager:…}}` string rather than the value behind it. Neither is
+set on AWS, where the stacks generate the values and pass the reference.
+
+Two switches change the shape of the output for a real deployment. `WAF_SDK_SHIM=off`
+replaces the custom resource that builds the IP set with the plain
+`AWS::WAFv2::IPSet` and `AWS::WAFv2::WebACLAssociation` resources, which floci
+accepts and does not act on. Clearing `ALB_INTEGRATION_HOST` points the HTTP API
+integration at the load balancer's DNS name instead of at floci.
+
+`infra/a/NOTES.md` records what was run, how long each deploy took, what survived
+the teardown, and fourteen places floci behaves differently from AWS.
+
+## Architecture B: queues between VPCs
+
+Two VPCs with zero NAT gateways, so neither side has a route out. Retail puts a
+`PrescriptionCheckRequested` on `ftw-b-check-request`; a Fargate worker in the
+pharmacy VPC, with no load balancer and no inbound listener, reads it and
+answers on `ftw-b-check-result`; a second retail Lambda applies the result
+through an SQS event source mapping. `POST /orders` returns `PENDING` and the
+scenario polls. Both queues redrive to a dead letter queue at `maxReceiveCount`
+3, and redrive back is a manual `aws sqs start-message-move-task`.
+
+Five stacks. `RetailBase` and `PharmacyBase` hold a VPC each, the SQS, Secrets
+Manager and CloudWatch Logs interface endpoints, Postgres 16 in isolated
+subnets and a log group at 30 days, with termination protection on and RETAIN
+on the database. `Messaging` holds the queues, the KMS key, the two service
+roles and the two service users, outside both VPCs because SQS is regional.
+`RetailApp` and `PharmacyApp` hold everything that gets replaced.
+
+Nothing crosses a stack boundary as a CloudFormation export. The base stacks
+publish their ids as SSM parameters and the app stacks read them through
+`AWS::SSM::Parameter::Value<String>`, so destroying an app stack leaves the
+base untouched.
+
+```
+make up ARCH=b
+make bootstrap ARCH=b
+make deploy ARCH=b
+make e2e ARCH=b
+make conformance ARCH=b
+```
+
+`make deploy ARCH=b` runs once against a given floci. floci cannot create a
+read-only change set, so the CDK CLI issues an update on every stack it is
+asked about, and floci's update path re-creates Secrets Manager secrets and
+fails on the name. To change an app stack, destroy it and deploy it again with
+`--exclusively`. `infra/b/NOTES.md` has the commands, the timings, the IAM
+denials with their exact responses, and the rest of what floci does and does
+not do here.
+
+Identity is the part floci can actually enforce. This instance runs with
+`FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, so `retail-svc` sends to
+`ftw-b-check-request` and gets `AccessDeniedException` on `sqs:ReceiveMessage`,
+while `pharmacy-svc` consumes and replies. Queue policies name only the two
+role ARNs and are readable, but floci does not gate on them.
+
+## Architecture C: identity over addresses
+
+`infra/c/` is a CDK app in TypeScript, four stacks. `SharedBase` holds the VPC,
+the security groups and the two databases, and carries termination protection.
+`Events` holds the `orders` bus and the audit queue. `PharmacyApp` and
+`RetailApp` are the two that get destroyed and redeployed. Destroying both
+leaves the VPC, both security-group sets, both Postgres instances, the bus and
+all three queues in place.
+
+The VPC has no NAT gateways, no internet gateway and no route to `0.0.0.0/0`.
+Traffic to AWS goes through six interface endpoints and the S3 gateway
+endpoint. Every ingress rule names a security group; none names a CIDR. The
+retail Lambda has one identity, `ftw-c-retail-lambda`, and that role ARN is the
+only principal the pharmacy API's resource policy allows.
+
+Two things about running it on floci, both written up in
+[infra/c/NOTES.md](infra/c/NOTES.md).
+
+floci's CloudFormation cannot update a stack. `make deploy ARCH=c` works once on
+a fresh floci. After that, replace the app stacks with
+`cdk destroy --exclusively RetailApp PharmacyApp` and
+`cdk deploy --exclusively PharmacyApp RetailApp`, which is what keeps CDK from
+re-submitting `SharedBase` as a dependency. Delete the IAM user
+`ftw-c-retail-svc` in between, because floci does not remove it with the stack.
+
+`infra/c/.env` carries `DB_PASSWORD` and `PAYMENT_WEBHOOK_SECRET`. floci does
+not resolve `{{resolve:secretsmanager:...}}`, so a generated secret reaches the
+Lambda as literal placeholder text and every database connection and signature
+check fails. The stacks read both values at synth and still write them to
+Secrets Manager.
