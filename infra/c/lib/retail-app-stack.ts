@@ -1,5 +1,3 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
@@ -12,9 +10,14 @@ import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import type { Construct } from 'constructs';
 import {
   apiHostUrl,
+  assertRetailAppReady,
+  databasePassword,
   databaseUrl,
   EVENT_BUS_NAME,
+  EVENT_RULE_NAME,
+  paymentWebhookSecret,
   PREFIX,
+  RETAIL_APP_DIR,
   RETAIL_FUNCTION_NAME,
   RETAIL_LOG_GROUP,
   RETAIL_ROLE_NAME,
@@ -35,10 +38,9 @@ export interface RetailAppStackProps extends cdk.StackProps {
    * floci turns out not to evaluate the Lambda execution role.
    */
   readonly useStaticKeys: boolean;
+  /** Set AWS_REGION and AWS_DEFAULT_REGION on the Lambda, which are reserved names. */
+  readonly forceRegionEnv: boolean;
 }
-
-/** Where the real retail app lives once it is on main. */
-const APP_DIR = path.resolve(__dirname, '../../../apps/retail');
 
 /**
  * Retail: the only public edge in architecture C.
@@ -55,20 +57,13 @@ export class RetailAppStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: RetailAppStackProps) {
     super(scope, id, props);
 
-    const usingRealApp = fs.existsSync(path.join(APP_DIR, 'src', 'lambda.mjs'));
-    const code = usingRealApp
-      ? lambda.Code.fromAsset(APP_DIR, { exclude: ['node_modules/.cache', '*.log'] })
-      : lambda.Code.fromAsset(path.resolve(__dirname, '../lambda/retail'));
-    const handler = usingRealApp ? 'src/lambda.handler' : 'index.handler';
+    assertRetailAppReady();
 
     const webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       secretName: `${PREFIX}/retail/payment-webhook`,
       description: 'HMAC secret for the simulated payment webhook',
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({}),
-        generateStringKey: 'secret',
-        passwordLength: 40,
-        excludePunctuation: true,
+      secretObjectValue: {
+        secret: cdk.SecretValue.unsafePlainText(paymentWebhookSecret()),
       },
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
@@ -154,23 +149,19 @@ export class RetailAppStack extends cdk.Stack {
       EVENT_BUS_NAME,
       DATABASE_URL: databaseUrl(
         'retail',
-        props.dbSecret.secretValueFromJson('password').unsafeUnwrap(),
+        databasePassword(),
         props.db.dbInstanceEndpointPort,
         'retail',
       ),
-      PAYMENT_WEBHOOK_SECRET: webhookSecret.secretValueFromJson('secret').unsafeUnwrap(),
+      PAYMENT_WEBHOOK_SECRET: paymentWebhookSecret(),
       // ALLOWED_CIDRS is deliberately absent.
     };
-    if (props.useStaticKeys) {
-      environment.AWS_ACCESS_KEY_ID = accessKey.ref;
-      environment.AWS_SECRET_ACCESS_KEY = accessKey.attrSecretAccessKey;
-    }
 
     const fn = new lambda.Function(this, 'RetailFunction', {
       functionName: RETAIL_FUNCTION_NAME,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler,
-      code,
+      handler: 'src/lambda.handler',
+      code: lambda.Code.fromAsset(RETAIL_APP_DIR, { exclude: ['test', '*.log'] }),
       role,
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
@@ -180,6 +171,26 @@ export class RetailAppStack extends cdk.Stack {
       logGroup,
       environment,
     });
+
+    // AWS_REGION, AWS_DEFAULT_REGION and the two key variables are reserved,
+    // so CDK refuses them in `environment`. The Lambda runtime sets the region
+    // pair itself and SigV4 signing needs one, so they are only forced here
+    // when floci turns out not to. Same escape hatch carries the retail-svc
+    // keys when the execution role is not the identity floci evaluates.
+    const cfnFunction = fn.node.defaultChild as lambda.CfnFunction;
+    // Measured on floci 2.0.1: the Lambda container already carries AWS_REGION
+    // and AWS_DEFAULT_REGION, so this stays off.
+    if (props.forceRegionEnv) {
+      cfnFunction.addPropertyOverride('Environment.Variables.AWS_REGION', this.region);
+      cfnFunction.addPropertyOverride('Environment.Variables.AWS_DEFAULT_REGION', this.region);
+    }
+    if (props.useStaticKeys) {
+      cfnFunction.addPropertyOverride('Environment.Variables.AWS_ACCESS_KEY_ID', accessKey.ref);
+      cfnFunction.addPropertyOverride(
+        'Environment.Variables.AWS_SECRET_ACCESS_KEY',
+        accessKey.attrSecretAccessKey,
+      );
+    }
 
     const api = new apigateway.LambdaRestApi(this, 'RetailApi', {
       restApiName: `${PREFIX}-retail`,
@@ -247,5 +258,12 @@ export class RetailAppStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'RetailApiUrl', { value: apiHostUrl(api.restApiId) });
     new cdk.CfnOutput(this, 'RetailLogGroup', { value: logGroup.logGroupName });
     new cdk.CfnOutput(this, 'RetailRoleArn', { value: role.roleArn });
+
+    // Repeated from SharedBase and Events. floci cannot update a stack, so an
+    // app redeploy has to use --exclusively, and then outputs.json only holds
+    // the stacks that ran. The tests flatten it, so these three keep it whole.
+    new cdk.CfnOutput(this, 'VpcId', { value: props.vpc.vpcId });
+    new cdk.CfnOutput(this, 'EventBusName', { value: EVENT_BUS_NAME });
+    new cdk.CfnOutput(this, 'EventRuleName', { value: EVENT_RULE_NAME });
   }
 }

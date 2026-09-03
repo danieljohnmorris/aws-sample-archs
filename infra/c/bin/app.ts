@@ -40,4 +40,5 @@ new RetailAppStack(app, 'RetailApp', {
   pharmacyInvokeArns: pharmacy.invokeArns,
   pharmacyBaseUrl: pharmacy.internalBaseUrl,
   useStaticKeys: app.node.tryGetContext('useStaticKeys') === 'true',
+  forceRegionEnv: app.node.tryGetContext('forceRegionEnv') === 'true',
 });

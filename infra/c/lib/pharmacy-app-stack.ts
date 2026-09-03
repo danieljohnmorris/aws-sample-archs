@@ -15,14 +15,13 @@ import {
   albUpstream,
   apiHostUrl,
   apiInternalUrl,
+  databasePassword,
   databaseUrl,
   FLOCI_HOSTNAME,
   FLOCI_INTERNAL_PORT,
   PHARMACY_CONTAINER_PORT,
-  HAVE_PHARMACY_APP,
   PHARMACY_HEALTH_PATH,
   PHARMACY_IMAGE,
-  PHARMACY_PLACEHOLDER_COMMAND,
   PREFIX,
   RETAIL_ROLE_NAME,
   STAGE_NAME,
@@ -78,17 +77,19 @@ export class PharmacyAppStack extends cdk.Stack {
     taskDefinition.addContainer('pharmacy', {
       containerName: 'pharmacy',
       image: ecs.ContainerImage.fromRegistry(PHARMACY_IMAGE),
-      ...(HAVE_PHARMACY_APP ? {} : { command: PHARMACY_PLACEHOLDER_COMMAND }),
       portMappings: [{ containerPort: PHARMACY_CONTAINER_PORT, protocol: ecs.Protocol.TCP }],
       environment: {
         SERVICE_NAME: 'pharmacy',
         PORT: String(PHARMACY_CONTAINER_PORT),
         // ALLOWED_CIDRS is deliberately absent. C identifies callers by role.
         AWS_ENDPOINT_URL: `http://${FLOCI_HOSTNAME}:${FLOCI_INTERNAL_PORT}`,
+        // Both spellings: the SDK v3 environment provider reads AWS_REGION,
+        // and SigV4 signing throws without one.
+        AWS_REGION: this.region,
         AWS_DEFAULT_REGION: this.region,
         DATABASE_URL: databaseUrl(
           'pharmacy',
-          props.dbSecret.secretValueFromJson('password').unsafeUnwrap(),
+          databasePassword(),
           props.db.dbInstanceEndpointPort,
           'pharmacy',
         ),
@@ -159,17 +160,25 @@ export class PharmacyAppStack extends cdk.Stack {
       endpointTypes: [apigateway.EndpointType.REGIONAL],
       deployOptions: { stageName: STAGE_NAME },
       policy: resourcePolicy,
-      defaultMethodOptions: { authorizationType: apigateway.AuthorizationType.IAM },
+      // apiKeyRequired is set rather than left to default, because floci only
+      // reports the fields the template carried and a reader cannot tell an
+      // absent field from a false one.
+      defaultMethodOptions: {
+        authorizationType: apigateway.AuthorizationType.IAM,
+        apiKeyRequired: false,
+      },
     });
 
     const health = this.api.root.addResource('health');
     health.addMethod('GET', this.proxyTo(`${albBase}/health`, 'GET'), {
       authorizationType: apigateway.AuthorizationType.IAM,
+      apiKeyRequired: false,
     });
 
     const prescriptions = this.api.root.addResource('prescriptions');
     prescriptions.addMethod('POST', this.proxyTo(`${albBase}/prescriptions`, 'POST'), {
       authorizationType: apigateway.AuthorizationType.IAM,
+      apiKeyRequired: false,
     });
 
     const prescription = prescriptions.addResource('{id}');
@@ -183,6 +192,7 @@ export class PharmacyAppStack extends cdk.Stack {
       }),
       {
         authorizationType: apigateway.AuthorizationType.IAM,
+        apiKeyRequired: false,
         requestParameters: {
           'method.request.path.id': true,
           'method.request.querystring.customerId': false,

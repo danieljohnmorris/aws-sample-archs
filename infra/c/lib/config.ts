@@ -14,19 +14,38 @@ import * as path from 'node:path';
 /** Prefix on every named resource, matching the floci compose project. */
 export const PREFIX = 'ftw-c';
 
-/** Where the two services live once they are on main. */
+/** The two services, built once against CONTRACT.md. */
 export const APPS_DIR = path.resolve(__dirname, '../../../apps');
 
-export const HAVE_RETAIL_APP = fs.existsSync(path.join(APPS_DIR, 'retail', 'src', 'lambda.mjs'));
-export const HAVE_PHARMACY_APP = fs.existsSync(path.join(APPS_DIR, 'pharmacy', 'Dockerfile'));
+export const RETAIL_APP_DIR = path.join(APPS_DIR, 'retail');
+
+/**
+ * The Lambda asset is the app directory zipped whole, so `make deps` has to
+ * have run. Fail at synth rather than at the first invoke.
+ */
+export function assertRetailAppReady(): void {
+  const entry = path.join(RETAIL_APP_DIR, 'src', 'lambda.mjs');
+  const modules = path.join(RETAIL_APP_DIR, 'node_modules', '@smithy', 'signature-v4');
+  if (!fs.existsSync(entry)) throw new Error(`${entry} is missing`);
+  if (!fs.existsSync(modules)) {
+    throw new Error(`${RETAIL_APP_DIR}/node_modules is incomplete. Run make deps`);
+  }
+}
 
 export const ACCOUNT = process.env.CDK_DEFAULT_ACCOUNT ?? '000000000000';
-export const REGION = process.env.CDK_DEFAULT_REGION ?? 'eu-west-1';
+export const REGION = process.env.CDK_DEFAULT_REGION ?? 'eu-west-2';
 
 /** Execution role for the retail Lambda. Referenced by name from PharmacyApp. */
 export const RETAIL_ROLE_NAME = `${PREFIX}-retail-lambda`;
 
-/** Fallback identity, used only if floci does not evaluate the Lambda role. */
+/**
+ * Long-lived identity carrying the same policy as the role.
+ *
+ * It exists because floci reports the Lambda's execution role but does not
+ * evaluate it. Enable it with `-c useStaticKeys=true`, and read the caveat in
+ * infra/c/NOTES.md first: floci resolves events:PutEvents to the wildcard
+ * resource, so this identity is denied the one call retail has to make.
+ */
 export const RETAIL_USER_NAME = `${PREFIX}-retail-svc`;
 
 export const RETAIL_FUNCTION_NAME = `${PREFIX}-retail`;
@@ -41,37 +60,42 @@ export const ALB_LISTENER_PORT = 8100;
 /**
  * Port the pharmacy container listens on, and the path the ALB probes.
  *
- * Both are the same for the placeholder and the real app. The security group
- * rule that names this port lives in SharedBase, and floci cannot update a
- * stack, so it has to be right before the apps land.
+ * The security group rule that names this port lives in SharedBase, and floci
+ * cannot update a stack, so changing it means rebuilding the base.
  */
 export const PHARMACY_CONTAINER_PORT = 8080;
 export const PHARMACY_HEALTH_PATH = '/health';
 
-/** The real image once apps/pharmacy is on main, nginx standing in until then. */
-export const PHARMACY_IMAGE = HAVE_PHARMACY_APP
-  ? 'ftw-pharmacy:local'
-  : 'public.ecr.aws/docker/library/nginx:alpine';
-
-/**
- * Makes the placeholder answer on 8080 and serve the pharmacy health response
- * on every path, so the port and path stay the same when the app arrives.
- */
-const PLACEHOLDER_NGINX_CONF = [
-  'server {',
-  `listen ${PHARMACY_CONTAINER_PORT};`,
-  'default_type application/json;',
-  `location / { return 200 '{"ok":true,"service":"pharmacy","placeholder":true}'; }`,
-  '}',
-].join(' ');
-
-export const PHARMACY_PLACEHOLDER_COMMAND = [
-  'sh',
-  '-c',
-  `printf '%s' ${JSON.stringify(PLACEHOLDER_NGINX_CONF)} > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'`,
-];
+/** Built by `make images` from apps/pharmacy. */
+export const PHARMACY_IMAGE = 'ftw-pharmacy:local';
 
 export const STAGE_NAME = 'prod';
+
+/**
+ * HMAC secret for the payment webhook. It comes from infra/c/.env so the
+ * deployed secret and the value the e2e test signs with cannot drift; the
+ * stack copies it into Secrets Manager and the Lambda reads it back from there.
+ */
+export function paymentWebhookSecret(): string {
+  const value = process.env.PAYMENT_WEBHOOK_SECRET;
+  if (!value) throw new Error('PAYMENT_WEBHOOK_SECRET is not set. Add it to infra/c/.env');
+  return value;
+}
+
+/**
+ * Master password for both databases, also from infra/c/.env.
+ *
+ * floci's CloudFormation does not resolve `{{resolve:secretsmanager:...}}`, so
+ * a generated secret arrives in the Lambda environment as the literal
+ * placeholder text and every connection fails. The value is supplied at synth
+ * instead, and still written to Secrets Manager so the role that may read it
+ * is part of the design. See infra/c/NOTES.md.
+ */
+export function databasePassword(): string {
+  const value = process.env.DB_PASSWORD;
+  if (!value) throw new Error('DB_PASSWORD is not set. Add it to infra/c/.env');
+  return value;
+}
 
 /**
  * floci listens on 4566 inside its own network and is published on FLOCI_PORT
