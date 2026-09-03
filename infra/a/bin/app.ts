@@ -20,10 +20,34 @@ const app = new cdk.App();
 
 const env: cdk.Environment = {
   account: process.env.CDK_DEFAULT_ACCOUNT ?? '000000000000',
-  region: process.env.CDK_DEFAULT_REGION ?? 'eu-west-1',
+  region: process.env.CDK_DEFAULT_REGION ?? 'eu-west-2',
 };
 
 const flociPort = process.env.FLOCI_PORT ?? '4566';
+const awsRegion = env.region!;
+
+/**
+ * floci's CloudFormation does not build WAF IP sets or stage associations. The
+ * shim does those two calls through the SDK instead. Set WAF_SDK_SHIM=off for
+ * the plain declarative resources, which is what a real deployment wants.
+ */
+const useWafSdkShim = (process.env.WAF_SDK_SHIM ?? 'on') !== 'off';
+
+/**
+ * The payment webhook key. Fixed locally, because the end-to-end test has to
+ * sign a request with the same value the Lambda checks against, and infra/a/.env
+ * is the one place both sides read. Unset it and the stack generates a key
+ * nobody records, which is what should happen anywhere real.
+ */
+const webhookSecretValue = process.env.PAYMENT_WEBHOOK_SECRET;
+
+/**
+ * The database password, for the same reason. floci hands a Lambda or a task
+ * the literal `{{resolve:secretsmanager:…}}` string rather than the value, so
+ * DATABASE_URL has to carry the password. Both base stacks and both app stacks
+ * read this one variable, which keeps them in step across separate deploys.
+ */
+const dbPasswordValue = process.env.DB_PASSWORD;
 /** Inside the 8080-8089 range docker-compose publishes for architecture A. */
 const albPort = Number(process.env.ALB_LISTENER_PORT ?? 8080);
 
@@ -62,6 +86,7 @@ const retailBase = new BaseStack(app, 'RetailBase', {
   env,
   service: 'retail',
   cidr: '10.10.0.0/16',
+  dbPasswordValue,
   description: 'Retail network, database and NAT address. Retained across app deploys.',
   terminationProtection: true,
 });
@@ -70,6 +95,7 @@ const pharmacyBase = new BaseStack(app, 'PharmacyBase', {
   env,
   service: 'pharmacy',
   cidr: '10.20.0.0/16',
+  dbPasswordValue,
   description: 'Pharmacy network, database and NAT address. Retained across app deploys.',
   terminationProtection: true,
 });
@@ -84,6 +110,9 @@ const pharmacyApp = new PharmacyAppStack(app, 'PharmacyApp', {
   // container. It publishes the listener on its own address, so this reaches the
   // same place. Unset this to get the load balancer name AWS expects.
   albIntegrationHost: process.env.ALB_INTEGRATION_HOST ?? 'floci',
+  awsRegion,
+  useWafSdkShim,
+  dbPasswordValue,
   ...pharmacyImage,
 });
 
@@ -91,6 +120,9 @@ const retailApp = new RetailAppStack(app, 'RetailApp', {
   env,
   description: 'Retail service on Lambda behind a REST API.',
   flociPort,
+  webhookSecretValue,
+  useWafSdkShim,
+  dbPasswordValue,
   ...retailCode,
 });
 

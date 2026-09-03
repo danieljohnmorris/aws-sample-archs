@@ -33,6 +33,15 @@ export interface PharmacyAppStackProps extends cdk.StackProps {
   readonly albIntegrationHost?: string;
   /** floci's edge port, 4566 for architecture A. */
   readonly flociPort: string;
+  /** Region, for the task environment. Lambda gets it from the runtime. */
+  readonly awsRegion: string;
+  /** See IpAllowlistProps.useSdkShim. */
+  readonly useWafSdkShim: boolean;
+  /**
+   * Fixed database password, matching the one PharmacyBase gave the instance.
+   * Undefined on AWS, where the reference below resolves instead.
+   */
+  readonly dbPasswordValue?: string;
 }
 
 /**
@@ -84,10 +93,16 @@ export class PharmacyAppStack extends cdk.Stack {
           port: base.dbEndpointPort,
           database: databaseName('pharmacy'),
           username: 'postgres',
-          password: secretJsonField(base.dbSecretArn, 'password'),
+          // floci passes `{{resolve:secretsmanager:…}}` into a task environment
+          // variable verbatim. Measured 2026-09-03, see NOTES.md.
+          password: props.dbPasswordValue ?? secretJsonField(base.dbSecretArn, 'password'),
         }),
-        // Lambda gets this injected; an ECS task does not.
+        // floci injects all three into a Lambda and none of them into a task.
+        // The SDK v3 environment credential and region providers read AWS_REGION,
+        // not AWS_DEFAULT_REGION, so both are set.
         AWS_ENDPOINT_URL: `http://floci:${props.flociPort}`,
+        AWS_REGION: props.awsRegion,
+        AWS_DEFAULT_REGION: props.awsRegion,
       },
       // floci records the log configuration and stores nothing through it. The
       // group is still declared and named so the template matches what AWS would
@@ -177,6 +192,7 @@ export class PharmacyAppStack extends cdk.Stack {
       name: `${PREFIX}-pharmacy`,
       allowedCidrs: [retail.cidr, '127.0.0.1/32'],
       resourceArn: stageArn,
+      useSdkShim: props.useWafSdkShim,
     });
 
     const apiUrl = flociHttpApiUrl(httpApi.apiId, props.flociPort);

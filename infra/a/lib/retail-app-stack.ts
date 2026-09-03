@@ -29,6 +29,19 @@ export interface RetailAppStackProps extends cdk.StackProps {
   readonly handler: string;
   /** floci's edge port, 4566 for architecture A. */
   readonly flociPort: string;
+  /**
+   * Fixed HMAC key for POST /webhooks/payment. Set locally so the end-to-end
+   * test can sign a request; left undefined on AWS so the value is generated
+   * and never written down.
+   */
+  readonly webhookSecretValue?: string;
+  /** See IpAllowlistProps.useSdkShim. */
+  readonly useWafSdkShim: boolean;
+  /**
+   * Fixed database password, matching the one RetailBase gave the instance.
+   * Undefined on AWS, where the reference below resolves instead.
+   */
+  readonly dbPasswordValue?: string;
 }
 
 /**
@@ -63,10 +76,9 @@ export class RetailAppStack extends cdk.Stack {
     const webhookSecret = new secretsmanager.Secret(this, 'WebhookSecret', {
       description: 'HMAC-SHA256 key for POST /webhooks/payment',
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      generateSecretString: {
-        passwordLength: 48,
-        excludePunctuation: true,
-      },
+      ...(props.webhookSecretValue
+        ? { secretStringValue: cdk.SecretValue.unsafePlainText(props.webhookSecretValue) }
+        : { generateSecretString: { passwordLength: 48, excludePunctuation: true } }),
     });
 
     const fn = new lambda.Function(this, 'Fn', {
@@ -86,13 +98,19 @@ export class RetailAppStack extends cdk.Stack {
           port: base.dbEndpointPort,
           database: databaseName('retail'),
           username: 'postgres',
-          password: secretJsonField(base.dbSecretArn, 'password'),
+          // floci passes `{{resolve:secretsmanager:…}}` into a Lambda
+          // environment variable verbatim, so pg is handed a URL it cannot
+          // parse and every request fails with "Invalid URL". Measured
+          // 2026-09-03, see NOTES.md. Locally the password is inlined.
+          password: props.dbPasswordValue ?? secretJsonField(base.dbSecretArn, 'password'),
         }),
         // Pharmacy's NAT address, loopback because floci reports every caller
         // through API Gateway as 127.0.0.1, and the private range the shared
         // Docker network sits in.
         ALLOWED_CIDRS: `${pharmacy.cidr},127.0.0.1/32,172.16.0.0/12`,
-        PAYMENT_WEBHOOK_SECRET: webhookSecret.secretValue.unsafeUnwrap(),
+        // Same reason as the password above.
+        PAYMENT_WEBHOOK_SECRET:
+          props.webhookSecretValue ?? webhookSecret.secretValue.unsafeUnwrap(),
       },
     });
 
@@ -128,12 +146,18 @@ export class RetailAppStack extends cdk.Stack {
       }),
     });
 
+    // RestApi emits an `Endpoint` output holding an execute-api.amazonaws.com
+    // URL that floci does not serve. Removed so outputs.json carries one URL and
+    // it is the one that answers.
+    api.node.tryRemoveChild('Endpoint');
+
     const stageArn = `arn:${cdk.Aws.PARTITION}:apigateway:${cdk.Aws.REGION}::/restapis/${api.restApiId}/stages/${api.deploymentStage.stageName}`;
 
     const perimeter = new IpAllowlist(this, 'Perimeter', {
       name: `${PREFIX}-retail`,
       allowedCidrs: [pharmacy.cidr, '127.0.0.1/32'],
       resourceArn: stageArn,
+      useSdkShim: props.useWafSdkShim,
     });
 
     const apiUrl = flociRestApiUrl(

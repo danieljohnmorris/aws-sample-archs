@@ -19,6 +19,13 @@ export interface BaseStackProps extends cdk.StackProps {
   readonly service: ServiceName;
   /** VPC CIDR. The two VPCs do not overlap, and neither is peered. */
   readonly cidr: string;
+  /**
+   * Fixed database password. Set locally, because floci does not resolve
+   * `{{resolve:secretsmanager:…}}` in a Lambda or task environment variable and
+   * DATABASE_URL therefore has to carry the password itself. Left undefined on
+   * AWS, where the password is generated and only the reference travels.
+   */
+  readonly dbPasswordValue?: string;
 }
 
 /**
@@ -107,13 +114,28 @@ export class BaseStack extends cdk.Stack {
     const dbSecret = new secretsmanager.Secret(this, 'DbSecret', {
       secretName: `${PREFIX}/${service}/db`,
       description: `${service} Postgres credentials`,
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ username: 'postgres', dbname: databaseName(service) }),
-        generateStringKey: 'password',
-        passwordLength: 32,
-        // Alphanumeric, so the password drops into DATABASE_URL unescaped.
-        excludePunctuation: true,
-      },
+      ...(props.dbPasswordValue
+        ? {
+            secretStringValue: cdk.SecretValue.unsafePlainText(
+              JSON.stringify({
+                username: 'postgres',
+                password: props.dbPasswordValue,
+                dbname: databaseName(service),
+              }),
+            ),
+          }
+        : {
+            generateSecretString: {
+              secretStringTemplate: JSON.stringify({
+                username: 'postgres',
+                dbname: databaseName(service),
+              }),
+              generateStringKey: 'password',
+              passwordLength: 32,
+              // Alphanumeric, so the password drops into DATABASE_URL unescaped.
+              excludePunctuation: true,
+            },
+          }),
     });
 
     const db = new rds.DatabaseInstance(this, 'Db', {
@@ -129,7 +151,9 @@ export class BaseStack extends cdk.Stack {
       securityGroups: [dbSg],
       credentials: rds.Credentials.fromPassword(
         'postgres',
-        dbSecret.secretValueFromJson('password'),
+        props.dbPasswordValue
+          ? cdk.SecretValue.unsafePlainText(props.dbPasswordValue)
+          : dbSecret.secretValueFromJson('password'),
       ),
       databaseName: databaseName(service),
       allocatedStorage: 20,
