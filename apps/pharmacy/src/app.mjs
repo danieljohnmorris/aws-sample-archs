@@ -19,7 +19,13 @@ app.use('*', async (c, next) => {
   c.set('correlationId', correlationId);
   c.set('sourceIp', sourceIpOf(c));
 
-  await next();
+  try {
+    await next();
+  } catch (err) {
+    // app.onError takes anything thrown as an Error. This catches the rest, so
+    // no request escapes without a response and a log line.
+    c.res = failed(c, err);
+  }
 
   c.res.headers.set('content-type', 'application/json');
   c.res.headers.set('x-correlation-id', correlationId);
@@ -43,15 +49,17 @@ app.use('*', async (c, next) => {
   await next();
 });
 
-app.onError((err, c) => {
+app.onError((err, c) => failed(c, err));
+
+function failed(c, err) {
   logEvent('error', 'unhandled', {
     correlationId: c.get('correlationId'),
     path: c.req.path,
-    error: err.message,
-    stack: err.stack,
+    error: err?.message,
+    stack: err?.stack,
   });
   return c.json({ error: 'internal_error' }, 500);
-});
+}
 
 app.notFound((c) => c.json({ error: 'not_found', path: c.req.path }, 404));
 
