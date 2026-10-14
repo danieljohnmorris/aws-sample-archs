@@ -337,7 +337,7 @@ All five deployed on fresh floci instances on 2026-10-14, one after another on t
 |---|---|---|---|---|---|
 | Stacks | 4 | 5 | 4 | 3 | 2 |
 | CloudFormation resources (`cdk synth`) | 142 | 139 | 114 | 67 | 31 |
-| CDK TypeScript lines (`bin/` + `lib/`) | 1,116 | 954 | 1,030 | 390 | 252 |
+| CDK TypeScript lines (`bin/` + `lib/`, no blanks or comments) | 700 | 683 | 749 | 311 | 207 |
 | VPCs | 2 | 2 | 1 | 1 | 1 |
 | NAT gateways | 2 | 0 | 0 | 1 | 0 |
 | Elastic IPs | 2 | 0 | 0 | 1 | 0 |
