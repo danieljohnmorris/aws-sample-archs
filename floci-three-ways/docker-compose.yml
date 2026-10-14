@@ -1,0 +1,23 @@
+# One floci per architecture. Set via `make up ARCH=a|b|c` or infra/<arch>/.env.
+services:
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "${FLOCI_PORT:-4566}:4566"
+      - "${RDS_PORTS:-7001-7010}:${RDS_PORTS:-7001-7010}"
+      - "${ALB_PORTS:-8080-8089}:${ALB_PORTS:-8080-8089}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FLOCI_HOSTNAME: floci
+      FLOCI_SERVICES_ECS_DOCKER_NETWORK: ${FLOCI_NET:-ftw-a_default}
+      FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK: ${FLOCI_NET:-ftw-a_default}
+      FLOCI_SERVICES_RDS_ENDPOINT_HOST: localhost
+      FLOCI_SERVICES_RDS_PROXY_BASE_PORT: ${RDS_BASE:-7001}
+      FLOCI_SERVICES_RDS_PROXY_MAX_PORT: ${RDS_MAX:-7010}
+      FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED: "${IAM_ENFORCEMENT:-false}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_floci/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

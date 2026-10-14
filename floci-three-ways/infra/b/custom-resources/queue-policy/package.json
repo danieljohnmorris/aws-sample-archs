@@ -1,0 +1,11 @@
+{
+  "name": "ftw-b-queue-policy-cr",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Custom resource that applies an SQS queue policy on floci.",
+  "main": "index.mjs",
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.658.0"
+  }
+}
