@@ -1,6 +1,6 @@
 # Service contract
 
-Shared by all three architectures. Apps are built once against this; each `infra/*` CDK app wires them differently. Change this file before changing an app or a stack.
+Shared by all three architectures and the Simplified pair (one VPC, monolith). Apps are built once against this; each `infra/*` CDK app wires them differently. Change this file before changing an app or a stack.
 
 ## Services
 
@@ -37,6 +37,8 @@ Handlers read the parsed body, query and raw body from the Hono context. Respons
 | A | Synchronous HTTP `GET` to `PHARMACY_BASE_URL` + `/prescriptions/:id/check`. Retail applies the answer inline; `POST /orders` returns the final status. |
 | B | Retail sends `PrescriptionCheckRequested` to `CHECK_REQUEST_QUEUE_URL`. Pharmacy consumer answers on `CHECK_RESULT_QUEUE_URL`. Retail consumer applies the result. `POST /orders` returns `PENDING`; tests poll `GET /orders/:id`. |
 | C | Synchronous HTTP as in A, but the request is SigV4-signed with the caller's role and the pharmacy API is `AWS_IAM`. Order events also go to an EventBridge bus for audit. |
+| Simplified · one VPC | Synchronous HTTP `GET` to `PHARMACY_BASE_URL`, the internal ALB's DNS name. No signing, no `ALLOWED_CIDRS`, no queue, no bus. The pharmacy ALB's security group admits only retail's app security group. Same app code as A. |
+| Simplified · monolith | No call. `apps/monolith` is one Hono app with the retail and pharmacy routes, and `POST /orders` calls `checkPrescription()` as a function. `POST /orders` returns the final status. |
 
 Message shapes (B and C events), all with `Detail`/body as JSON:
 
@@ -50,6 +52,10 @@ Consumers must dedupe on `idempotencyKey`.
 ## Allowlist middleware (A only, on by default there, off elsewhere)
 
 `ALLOWED_CIDRS` comma-separated. When set, `handle` returns 403 `{ error: "forbidden", sourceIp }` for any `sourceIp` outside the list, except `/health`. This is the one allowlist layer floci lets us see rejecting a request.
+
+## The monolith service
+
+`apps/monolith` serves every retail route except `POST /internal/prescription-result`, and both pharmacy routes, on one URL. `GET /health` returns `{ ok: true, service: "monolith" }`, one health check for one process. It has one Postgres database with the `orders` and `prescriptions` tables. It has no queue consumer, no allowlist and no AWS SDK. Its stack outputs `RetailApiUrl` and `PharmacyApiUrl` as the same URL, so the e2e scenario runs unchanged except for step 1.
 
 ## Storage
 
@@ -82,13 +88,13 @@ Every request logs one JSON line to stdout: `{ ts, service, level, msg, method, 
 
 One floci per architecture so agents and stacks do not collide. `docker-compose.yml` reads:
 
-| Var | A | B | C |
-|---|---|---|---|
-| `COMPOSE_PROJECT_NAME` | `ftw-a` | `ftw-b` | `ftw-c` |
-| `FLOCI_PORT` | 4566 | 4576 | 4586 |
-| `RDS_PORTS` | 7001-7010 | 7011-7020 | 7021-7030 |
-| `ALB_PORTS` | 8080-8089 | 8090-8099 | 8100-8109 |
-| `FLOCI_NET` | `ftw-a_default` | `ftw-b_default` | `ftw-c_default` |
+| Var | A | B | C | simple-vpc | monolith |
+|---|---|---|---|---|---|
+| `COMPOSE_PROJECT_NAME` | `ftw-a` | `ftw-b` | `ftw-c` | `ftw-sv` | `ftw-mono` |
+| `FLOCI_PORT` | 4566 | 4576 | 4586 | 4596 | 4606 |
+| `RDS_PORTS` | 7001-7010 | 7011-7020 | 7021-7030 | 7031-7040 | 7041-7050 |
+| `ALB_PORTS` | 8080-8089 | 8090-8099 | 8100-8109 | 8110-8119 | 8120-8129 |
+| `FLOCI_NET` | `ftw-a_default` | `ftw-b_default` | `ftw-c_default` | `ftw-sv_default` | `ftw-mono_default` |
 
 `make up ARCH=a` sets them. `infra/<arch>/.env` holds the same values for CDK and tests.
 
@@ -113,3 +119,5 @@ Read configuration back through the SDK and assert. Per architecture, at minimum
 - A: pharmacy Web ACL default action is `Block`; its IP set contains retail's NAT EIP; retail DB security group admits only retail's app security group on 5432; no IP set contains `0.0.0.0/0`.
 - B: both queues have a DLQ with `maxReceiveCount` 3; queue policies name only the intended role ARNs; no security group has an inbound rule from `0.0.0.0/0`.
 - C: pharmacy API `GET /prescriptions/{id}/check` has `authorizationType: AWS_IAM`; every security group ingress rule inside the VPC is SG-sourced, none CIDR-sourced; no NAT gateways exist; the EventBridge rule targets a queue that has a DLQ.
+- Simplified · one VPC: exactly one VPC, `10.70.0.0/16`; exactly one NAT gateway; the pharmacy ALB scheme is `internal` and its group admits only retail's app group; every ingress rule in the VPC is SG-sourced; no pharmacy API Gateway, no queues, no custom event bus.
+- Simplified · monolith: one VPC with no NAT gateway; one RDS instance; one Lambda function; no load balancer; no queues; one REST API; one ingress rule, app to database on 5432.

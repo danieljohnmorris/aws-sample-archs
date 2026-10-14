@@ -10,6 +10,11 @@ Two services, `retail` and `pharmacy`. One scenario: a customer orders a prescri
 - **B. Queues between VPCs.** Same two VPCs, no direct calls. SQS outside both, dead-letter queues, redrive.
 - **C. Identity over addresses.** Callers are IAM roles. Security groups reference security groups. VPC endpoints replace NAT. EventBridge for async.
 
+Then two simpler baselines, the ones most teams start from before they need A, B or C:
+
+- **Simplified · one VPC.** Two services in one VPC. Retail calls pharmacy over plain HTTP through an internal ALB. Security groups are the only control between them. One NAT gateway.
+- **Simplified · monolith.** One app, one database. The prescription check is a function call.
+
 ## Layout
 
 ```
@@ -18,8 +23,11 @@ apps/pharmacy/      Node, same
 infra/a/            CDK, perimeter and addresses
 infra/b/            CDK, queues between VPCs
 infra/c/            CDK, identity over addresses
+apps/monolith/      Node, retail and pharmacy in one Hono app
+infra/simple-vpc/   CDK, Simplified one VPC
+infra/monolith/     CDK, Simplified monolith
 conformance/        SDK tests that read config back from floci and assert invariants
-e2e/                One scenario test, runs against any of the three
+e2e/                One scenario test, runs against any of the five
 docker-compose.yml  floci plus a profile per architecture
 ```
 
@@ -291,3 +299,52 @@ not resolve `{{resolve:secretsmanager:...}}`, so a generated secret reaches the
 Lambda as literal placeholder text and every database connection and signature
 check fails. The stacks read both values at synth and still write them to
 Secrets Manager.
+
+## Simplified: one VPC, then a monolith
+
+A, B and C each add something on top of a plainer design. These two are that plainer design, built and tested the same way, so the comparison has a baseline.
+
+### Simplified · one VPC
+
+Three stacks, in `infra/simple-vpc/`, prefix `ftw-sv`. `SharedBase` holds one VPC (`10.70.0.0/16`) with public, private-with-egress and isolated tiers, one NAT gateway, five security groups and two Postgres 16 instances. `PharmacyApp` runs pharmacy on Fargate behind an internal ALB on port 8110. `RetailApp` runs retail on Lambda behind the customer REST API and the same managed-rules Web ACL as C.
+
+Retail calls `http://<alb dns name>:8110/prescriptions/:id/check` with no signature. `PHARMACY_BASE_URL` is the only wiring, and the apps are unchanged from A. What stops anything else calling pharmacy is one ingress rule: the pharmacy ALB group admits the retail app group and nothing else.
+
+Against C, this drops the pharmacy API Gateway, `AWS_IAM`, SigV4, the EventBridge bus and the seven VPC endpoints, and adds one NAT gateway. Against A, it drops the second VPC, the public hop between services and every IP allowlist.
+
+floci's embedded DNS answers the ALB name for containers floci starts, and the retail Lambda is one of them, so no floci-only API sits in the path here. Tests reach pharmacy on `http://localhost:8110`, because floci publishes the listener on the host.
+
+### Simplified · monolith
+
+Two stacks, in `infra/monolith/`, prefix `ftw-mono`. `Base` holds a VPC (`10.80.0.0/16`) with isolated subnets only, no NAT and no internet gateway, two security groups and one Postgres instance. `App` runs `apps/monolith` on Lambda behind one REST API with the same Web ACL.
+
+`apps/monolith` serves the retail and pharmacy routes on one URL with one `/health`. `POST /orders` calls `checkPrescription()` directly, so the order comes back decided in the same request. Orders and prescriptions are two tables in one database. The boundary between the halves is now module discipline, not the network: retail code can read prescription rows.
+
+```sh
+make up ARCH=simple-vpc        # or ARCH=monolith
+make bootstrap ARCH=simple-vpc
+make deploy ARCH=simple-vpc
+make e2e ARCH=simple-vpc
+make conformance ARCH=simple-vpc
+make e2e ARCH=monolith-local   # the monolith in-process against the test Postgres, no floci
+```
+
+### Measured side by side
+
+All five deployed on fresh floci instances on 2026-10-14, one after another on the same Mac. `floci/floci:latest` image `4e451c39c7bb`, CDK CLI 2.1139.0. Each passed `make e2e` (7 of 7) and `make conformance` on that run.
+
+| | A | B | C | One VPC | Monolith |
+|---|---|---|---|---|---|
+| Stacks | 4 | 5 | 4 | 3 | 2 |
+| CloudFormation resources (`cdk synth`) | 142 | 139 | 114 | 67 | 31 |
+| CDK TypeScript lines (`bin/` + `lib/`) | 1,116 | 954 | 1,030 | 390 | 252 |
+| VPCs | 2 | 2 | 1 | 1 | 1 |
+| NAT gateways | 2 | 0 | 0 | 1 | 0 |
+| Elastic IPs | 2 | 0 | 0 | 1 | 0 |
+| VPC endpoints | 0 | 6 | 7 | 0 | 0 |
+| Postgres instances | 2 | 2 | 2 | 2 | 1 |
+| SQS queues | 0 | 4 | 3 | 0 | 0 |
+| `make deploy`, wall clock | 51s | 57s | 35s | 34s | 32s |
+| `cdk deploy --all`, CDK total | 26.6s | 37.5s | 16.7s | 15.0s | 13.6s |
+
+Resource and line counts come from the templates and files in this repo. VPC endpoint counts come from the templates. NAT, EIP, VPC, Postgres and queue counts were read back from floci after the deploy with `scripts/measure-live.sh`. Wall clock includes `make deps` and `make images`, with the npm cache and Docker layers warm. floci is not AWS, so the times say how much CDK and CloudFormation work each design is, not how long AWS would take.
