@@ -1,0 +1,20 @@
+{
+  "name": "ftw-monolith",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Simplified monolith. Retail and pharmacy in one Hono app and one Postgres. Runs as a Lambda handler and as a container.",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/app.mjs",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.5",
+    "pg": "^8.13.0"
+  }
+}

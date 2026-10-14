@@ -102,6 +102,44 @@ export async function startLocalStack() {
   };
 }
 
+const MONOLITH_DB = 'ftw_e2e_monolith';
+
+/**
+ * ARCH=monolith-local. One server on the retail port, one database. The
+ * prescription check is a function call, so there is no pharmacy URL to set.
+ */
+export async function startLocalMonolith() {
+  const admin = new pg.Client({ connectionString: postgresBaseUrl(), connectionTimeoutMillis: 5000 });
+  await admin.connect();
+  try {
+    const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [MONOLITH_DB]);
+    if (existing.rowCount === 0) await admin.query(`CREATE DATABASE "${MONOLITH_DB}"`);
+  } finally {
+    await admin.end();
+  }
+  await assertPortFree(RETAIL_PORT);
+  const savedEnv = snapshot(['DATABASE_URL', 'PAYMENT_WEBHOOK_SECRET', 'PORT', 'SERVICE_NAME']);
+  delete process.env.PORT;
+  process.env.SERVICE_NAME = 'monolith';
+  process.env.PAYMENT_WEBHOOK_SECRET = WEBHOOK_SECRET;
+  process.env.DATABASE_URL = databaseUrl(MONOLITH_DB);
+  const db = await import(new URL('monolith/src/db.mjs', APPS));
+  await db.ensureSchema();
+  await db.query('TRUNCATE orders, prescriptions');
+  const server = await import(new URL('monolith/src/server.mjs', APPS));
+  const monolith = await server.start(RETAIL_PORT);
+  const url = `http://localhost:${monolith.port}`;
+  return {
+    retailUrl: url,
+    pharmacyUrl: url,
+    webhookSecret: WEBHOOK_SECRET,
+    async stop() {
+      await monolith.close();
+      savedEnv();
+    },
+  };
+}
+
 /** Ports 3001 and 3002 are fixed on purpose, so a clash is reported rather than dodged. */
 async function assertPortFree(port) {
   await new Promise((resolve, reject) => {

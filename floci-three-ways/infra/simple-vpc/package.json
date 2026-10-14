@@ -1,0 +1,19 @@
+{
+  "name": "ftw-infra-simple-vpc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Simplified one VPC: two services, internal ALB, no IAM between them. CDK app for floci project ftw-sv.",
+  "scripts": {
+    "synth": "npx aws-cdk@2.1139.0 synth",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.268.0",
+    "constructs": "^10.4.2"
+  }
+}

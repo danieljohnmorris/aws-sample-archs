@@ -1,9 +1,12 @@
 // Where the scenario points: in-process servers for ARCH=local, CloudFormation
-// outputs for ARCH=a, b or c.
+// outputs for ARCH=a, b, c, simple-vpc or monolith.
 import { readFile } from 'node:fs/promises';
 
 export const ARCH = process.env.ARCH || 'local';
-export const IS_LOCAL = ARCH === 'local';
+export const IS_LOCAL = ARCH === 'local' || ARCH === 'monolith-local';
+
+/** The monolith answers retail and pharmacy routes on one URL with one /health. */
+export const IS_MONOLITH = ARCH === 'monolith' || ARCH === 'monolith-local';
 
 const REPO_ROOT = new URL('../../', import.meta.url);
 
@@ -12,7 +15,7 @@ const REPO_ROOT = new URL('../../', import.meta.url);
  * environment wins, so `make` and a shell export both work.
  */
 export async function loadArchEnv(arch = ARCH) {
-  if (arch === 'local') return {};
+  if (arch === 'local' || arch === 'monolith-local') return {};
   const path = new URL(`infra/${arch}/.env`, REPO_ROOT);
   let text;
   try {

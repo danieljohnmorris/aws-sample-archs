@@ -1,13 +1,14 @@
 // The end-to-end scenario from CONTRACT.md, run against ARCH=local, a, b or c.
 //
 //   make e2e ARCH=local   both services in this process, one local Postgres
-//   make e2e ARCH=a|b|c   the deployed stacks, base URLs from outputs.json
+//   make e2e ARCH=a|b|c|simple-vpc|monolith   the deployed stacks, base URLs from outputs.json
+//   make e2e ARCH=monolith-local   the monolith in this process, one local Postgres
 //
 // Steps 3 and 4 poll, because architecture B answers on a queue.
 import assert from 'node:assert/strict';
 import { createHmac, randomUUID } from 'node:crypto';
 import { after, before, describe, it } from 'node:test';
-import { ARCH, IS_LOCAL, loadArchEnv, readOutputs, region, requireOutput } from './lib/config.mjs';
+import { ARCH, IS_LOCAL, IS_MONOLITH, loadArchEnv, readOutputs, region, requireOutput } from './lib/config.mjs';
 import { get, post } from './lib/http.mjs';
 import { pollUntil, TIMEOUT_MS } from './lib/poll.mjs';
 
@@ -25,8 +26,8 @@ describe(`end to end, ARCH=${ARCH}`, () => {
 
   before(async () => {
     if (IS_LOCAL) {
-      const { startLocalStack } = await import('./lib/local.mjs');
-      stack = await startLocalStack();
+      const { startLocalStack, startLocalMonolith } = await import('./lib/local.mjs');
+      stack = IS_MONOLITH ? await startLocalMonolith() : await startLocalStack();
       ({ retailUrl, pharmacyUrl, webhookSecret } = stack);
       return;
     }
@@ -61,6 +62,14 @@ describe(`end to end, ARCH=${ARCH}`, () => {
     );
 
   it('1. both services are healthy', async () => {
+    if (IS_MONOLITH) {
+      // One process, one health check. Retail and pharmacy routes share the URL.
+      const one = await get(retailUrl, '/health');
+      assert.equal(one.status, 200);
+      assert.deepEqual(one.body, { ok: true, service: 'monolith' });
+      assert.equal(pharmacyUrl, retailUrl, 'the monolith serves both halves on one URL');
+      return;
+    }
     const retail = await get(retailUrl, '/health');
     assert.equal(retail.status, 200);
     assert.deepEqual(retail.body, { ok: true, service: 'retail' });
